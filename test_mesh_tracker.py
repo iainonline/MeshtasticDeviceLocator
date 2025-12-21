@@ -486,6 +486,129 @@ class TestMeshPacketHandling(unittest.TestCase):
         self.assertEqual(node.altitude, 828)
 
 
+class TestMovementDetection(unittest.TestCase):
+    """Test Pi5 stationary detection and target node movement detection"""
+    
+    def setUp(self):
+        """Set up test tracker"""
+        self.tracker = mesh_tracker.MeshTracker(gps_port=2947)
+        self.tracker.gps_data.fix = True
+    
+    def test_pi_stationary_insufficient_data(self):
+        """Test stationary detection with insufficient data"""
+        result = self.tracker.is_pi_stationary()
+        self.assertFalse(result)
+    
+    def test_pi_stationary_true(self):
+        """Test Pi5 is detected as stationary"""
+        current_time = time.time()
+        
+        # Add GPS positions that are very close together (within 5 meters)
+        # Using smaller increments to stay within 10 meters
+        for i in range(10):
+            self.tracker.gps_history.append({
+                'timestamp': current_time + i,
+                'latitude': 35.968400 + (i * 0.000001),  # ~0.1 meter apart
+                'longitude': -115.081402
+            })
+        
+        result = self.tracker.is_pi_stationary(time_window=60, max_movement_meters=10.0)
+        self.assertTrue(result)
+    
+    def test_pi_moving(self):
+        """Test Pi5 is detected as moving"""
+        current_time = time.time()
+        
+        # Add GPS positions that are far apart (> 10 meters)
+        for i in range(10):
+            self.tracker.gps_history.append({
+                'timestamp': current_time + i,
+                'latitude': 35.968400 + (i * 0.0001),  # ~10+ meters apart
+                'longitude': -115.081402
+            })
+        
+        result = self.tracker.is_pi_stationary(time_window=60, max_movement_meters=10.0)
+        self.assertFalse(result)
+    
+    def test_target_node_moving(self):
+        """Test target node detected as moving when Pi is stationary"""
+        current_time = time.time()
+        node = mesh_tracker.MeshNode("!test")
+        
+        # Set up Pi as stationary
+        for i in range(10):
+            self.tracker.gps_history.append({
+                'timestamp': current_time + i,
+                'latitude': 35.968400,
+                'longitude': -115.081402
+            })
+        
+        # Add node signal history with changing signal (node moving)
+        for i in range(10):
+            node.signal_history.append({
+                'timestamp': current_time + i,
+                'rssi': -80 + (i * 2),  # Signal changing significantly
+                'snr': 5.0,
+                'latitude': 35.968400,
+                'longitude': -115.081402
+            })
+        
+        result = self.tracker.is_target_node_moving(node, 60)
+        self.assertEqual(result, 'moving')
+    
+    def test_target_node_stationary(self):
+        """Test target node detected as stationary when Pi is stationary"""
+        current_time = time.time()
+        node = mesh_tracker.MeshNode("!test")
+        
+        # Set up Pi as stationary
+        for i in range(10):
+            self.tracker.gps_history.append({
+                'timestamp': current_time + i,
+                'latitude': 35.968400,
+                'longitude': -115.081402
+            })
+        
+        # Add node signal history with stable signal (node stationary)
+        for i in range(10):
+            node.signal_history.append({
+                'timestamp': current_time + i,
+                'rssi': -70,  # Stable signal
+                'snr': 5.0,
+                'latitude': 35.968400,
+                'longitude': -115.081402
+            })
+        
+        result = self.tracker.is_target_node_moving(node, 60)
+        self.assertEqual(result, 'stationary')
+    
+    def test_target_node_unknown_both_moving(self):
+        """Test can't determine target node status when both are moving"""
+        current_time = time.time()
+        node = mesh_tracker.MeshNode("!test")
+        
+        # Set up Pi as moving
+        for i in range(10):
+            self.tracker.gps_history.append({
+                'timestamp': current_time + i,
+                'latitude': 35.968400 + (i * 0.0001),  # Moving
+                'longitude': -115.081402
+            })
+        
+        # Add node signal history
+        for i in range(10):
+            node.signal_history.append({
+                'timestamp': current_time + i,
+                'rssi': -70 + i,
+                'snr': 5.0,
+                'latitude': 35.968400,
+                'longitude': -115.081402
+            })
+        
+        result = self.tracker.is_target_node_moving(node, 60)
+        self.assertIsNone(result)  # Can't determine
+
+
 def run_tests():
     """Run all tests"""
     # Create test suite
@@ -495,12 +618,14 @@ def run_tests():
     # Add all test classes
     suite.addTests(loader.loadTestsFromTestCase(TestGPSData))
     suite.addTests(loader.loadTestsFromTestCase(TestMeshNode))
+    suite.addTests(loader.loadTestsFromTestCase(TestSignalTracking))
     suite.addTests(loader.loadTestsFromTestCase(TestDistanceCalculations))
     suite.addTests(loader.loadTestsFromTestCase(TestDistanceFormatting))
     suite.addTests(loader.loadTestsFromTestCase(TestNMEAParsing))
     suite.addTests(loader.loadTestsFromTestCase(TestDataLogging))
     suite.addTests(loader.loadTestsFromTestCase(TestScreenRendering))
     suite.addTests(loader.loadTestsFromTestCase(TestMeshPacketHandling))
+    suite.addTests(loader.loadTestsFromTestCase(TestMovementDetection))
     
     # Run tests with verbose output
     runner = unittest.TextTestRunner(verbosity=2)

@@ -251,6 +251,9 @@ class MeshTracker:
         self.selected_node: Optional[str] = None
         self.mode = "list"  # "list" or "track"
         
+        # GPS position history for stationary detection
+        self.gps_history: List[dict] = []  # Store Pi5's GPS positions with timestamps
+        
         # Auto-selection
         self.last_selected_file = "last_selected_node.txt"
         self.startup_time = time.time()
@@ -599,8 +602,83 @@ class MeshTracker:
             
             with open(self.log_file, 'a') as f:
                 f.write(json.dumps(log_entry) + '\n')
+            
+            # Track GPS position history for stationary detection
+            if self.gps_data.fix:
+                self.track_gps_position()
+                
         except Exception:
             pass
+    
+    def track_gps_position(self):
+        """Track Pi5's GPS position for stationary detection"""
+        current_time = time.time()
+        
+        if self.gps_data.fix:
+            self.gps_history.append({
+                'timestamp': current_time,
+                'latitude': self.gps_data.latitude,
+                'longitude': self.gps_data.longitude
+            })
+            
+            # Keep only last 5 minutes of history
+            cutoff_time = current_time - 300
+            self.gps_history = [h for h in self.gps_history if h['timestamp'] > cutoff_time]
+    
+    def is_pi_stationary(self, time_window: int = 60, max_movement_meters: float = 10.0) -> bool:
+        """
+        Determine if the Pi5 is stationary based on GPS history
+        Returns True if Pi hasn't moved more than max_movement_meters in the time window
+        """
+        if len(self.gps_history) < 2:
+            return False  # Not enough data
+        
+        current_time = time.time()
+        cutoff_time = current_time - time_window
+        
+        recent_positions = [h for h in self.gps_history if h['timestamp'] > cutoff_time]
+        
+        if len(recent_positions) < 2:
+            return False
+        
+        # Calculate max distance moved from any point to any other point
+        max_distance = 0
+        for i in range(len(recent_positions)):
+            for j in range(i + 1, len(recent_positions)):
+                dist = calculate_distance(
+                    recent_positions[i]['latitude'],
+                    recent_positions[i]['longitude'],
+                    recent_positions[j]['latitude'],
+                    recent_positions[j]['longitude']
+                )
+                max_distance = max(max_distance, dist)
+        
+        return max_distance <= max_movement_meters
+    
+    def is_target_node_moving(self, node: MeshNode, time_window: int = 60) -> Optional[str]:
+        """
+        Determine if the target node is moving or stationary
+        Returns: 'moving', 'stationary', or None if insufficient data
+        """
+        # Need to be tracking this node with signal history
+        if len(node.signal_history) < 3:
+            return None
+        
+        # Check if Pi5 is stationary
+        if not self.is_pi_stationary(time_window):
+            return None  # Can't determine if both are moving
+        
+        # Pi is stationary, check if signal is changing significantly
+        signal_change = node.get_signal_strength_change(time_window)
+        
+        if signal_change is None:
+            return None
+        
+        # If signal is changing significantly while Pi is stationary, target is moving
+        if abs(signal_change) > 3.0:  # More than 3 dBm change
+            return 'moving'
+        else:
+            return 'stationary'
     
     def generate_node_list_view(self) -> Layout:
         """Generate the node list view"""
@@ -812,6 +890,23 @@ class MeshTracker:
         
         if not trend_10s and not trend_60s and not trend_5m:
             info_table.add_row("Signal Trend", Text("Collecting data...", style="dim white"))
+        
+        # Add target node movement status
+        info_table.add_row("", "")  # Spacer
+        node_movement = self.is_target_node_moving(node, 60)
+        
+        if node_movement == 'moving':
+            info_table.add_row("Target Node Status", 
+                             Text("🚶 MOVING (signal changing, Pi stationary)", style="bold yellow"))
+        elif node_movement == 'stationary':
+            info_table.add_row("Target Node Status", 
+                             Text("🏠 STATIONARY (stable signal, Pi stationary)", style="bold cyan"))
+        else:
+            # Check if Pi itself is stationary
+            if self.is_pi_stationary(60):
+                info_table.add_row("Your Status", Text("📍 You are stationary", style="dim cyan"))
+            else:
+                info_table.add_row("Your Status", Text("🚗 You are moving", style="dim yellow"))
         
         info_panel = Panel(info_table, title="Navigation & Signal Tracking", border_style="green", box=box.DOUBLE)
         
