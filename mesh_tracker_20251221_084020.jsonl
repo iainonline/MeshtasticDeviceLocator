@@ -1,0 +1,3 @@
+{"timestamp": "2025-12-21T08:40:20.212439", "type": "mesh", "data": {"fromId": "!9e7656a8", "rxRssi": -94, "rxSnr": 5.5}, "gps_position": null}
+{"timestamp": "2025-12-21T08:40:20.212791", "type": "mesh", "data": {"fromId": "!9e7656a8", "decoded": {"position": {"latitude": 35.9684, "longitude": -115.081402, "altitude": 828}}}, "gps_position": null}
+{"timestamp": "2025-12-21T08:40:20.212997", "type": "mesh", "data": {"fromId": "!9e7656a8", "user": {"shortName": "Test", "longName": "Test Node"}}, "gps_position": null}

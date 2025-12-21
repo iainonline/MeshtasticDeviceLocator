@@ -283,20 +283,70 @@ class MeshTracker:
         """Start Meshtastic receiver thread"""
         def mesh_worker():
             try:
+                from pubsub import pub
+                
+                # Set up packet callback using pubsub
+                def on_receive(packet, interface):
+                    try:
+                        self.handle_mesh_packet(packet)
+                    except Exception as e:
+                        pass
+                
+                def on_connection(interface, topic=pub.AUTO_TOPIC):
+                    # Connection established
+                    pass
+                
+                # Subscribe to mesh packets
+                pub.subscribe(on_receive, "meshtastic.receive")
+                pub.subscribe(on_connection, "meshtastic.connection.established")
+                
                 # Connect to Meshtastic device
                 if self.meshtastic_port:
                     self.mesh_interface = meshtastic.serial_interface.SerialInterface(self.meshtastic_port)
                 else:
                     self.mesh_interface = meshtastic.serial_interface.SerialInterface()
                 
-                # Set up packet callback
-                def on_receive(packet, interface):
-                    try:
-                        self.handle_mesh_packet(packet)
-                    except Exception:
-                        pass
-                
-                self.mesh_interface.on_receive = on_receive
+                # Also get existing nodes from nodeDB
+                if self.mesh_interface and hasattr(self.mesh_interface, 'nodes'):
+                    for node_id, node_info in self.mesh_interface.nodes.items():
+                        try:
+                            # Create packet for existing nodes with proper user info
+                            fake_packet = {
+                                'from': node_id,
+                                'fromId': node_id,
+                                'decoded': {}
+                            }
+                            
+                            # Extract user info
+                            if hasattr(node_info, 'user') and node_info.user:
+                                user_dict = {}
+                                if hasattr(node_info['user'], 'shortName'):
+                                    user_dict['shortName'] = node_info['user'].get('shortName', 'Unknown')
+                                elif 'shortName' in node_info['user']:
+                                    user_dict['shortName'] = node_info['user']['shortName']
+                                    
+                                if hasattr(node_info['user'], 'longName'):
+                                    user_dict['longName'] = node_info['user'].get('longName', 'Unknown')
+                                elif 'longName' in node_info['user']:
+                                    user_dict['longName'] = node_info['user']['longName']
+                                    
+                                fake_packet['user'] = user_dict
+                            
+                            # Extract position
+                            if hasattr(node_info, 'position') and node_info.get('position'):
+                                pos = node_info['position']
+                                lat = pos.get('latitudeI', 0)
+                                lon = pos.get('longitudeI', 0)
+                                if lat != 0 and lon != 0:
+                                    fake_packet['decoded']['position'] = {
+                                        'latitude': lat / 1e7,
+                                        'longitude': lon / 1e7,
+                                        'altitude': pos.get('altitude', 0)
+                                    }
+                            
+                            self.handle_mesh_packet(fake_packet)
+                        except Exception:
+                            pass
                 
                 # Keep thread alive
                 while self.running:
@@ -323,7 +373,7 @@ class MeshTracker:
             if 'fromId' in packet:
                 node_id = packet['fromId']
             elif 'from' in packet:
-                node_id = str(packet['from'])
+                node_id = str(packet['from']) if not isinstance(packet['from'], str) else packet['from']
             
             if not node_id:
                 return
@@ -333,16 +383,32 @@ class MeshTracker:
                 self.nodes[node_id] = MeshNode(node_id)
             
             node = self.nodes[node_id]
-            node.update(packet)
+            node.last_seen = time.time()
+            node.packet_count += 1
+            
+            # Extract user info if available
+            if 'user' in packet:
+                user = packet['user']
+                if isinstance(user, dict):
+                    if 'shortName' in user:
+                        node.short_name = user['shortName']
+                    if 'longName' in user:
+                        node.long_name = user['longName']
+                elif hasattr(user, 'shortName'):
+                    node.short_name = user.shortName
+                if hasattr(user, 'longName'):
+                    node.long_name = user.longName
             
             # Extract position if available
             if 'decoded' in packet and 'position' in packet['decoded']:
                 pos = packet['decoded']['position']
-                if 'latitude' in pos and 'longitude' in pos:
-                    node.latitude = pos['latitude']
-                    node.longitude = pos['longitude']
-                if 'altitude' in pos:
-                    node.altitude = pos['altitude']
+                if isinstance(pos, dict):
+                    if 'latitude' in pos and pos['latitude'] != 0:
+                        node.latitude = pos['latitude']
+                    if 'longitude' in pos and pos['longitude'] != 0:
+                        node.longitude = pos['longitude']
+                    if 'altitude' in pos:
+                        node.altitude = pos['altitude']
             
             # Extract signal info
             if 'rxRssi' in packet:
