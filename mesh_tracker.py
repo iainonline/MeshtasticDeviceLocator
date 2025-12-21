@@ -886,12 +886,12 @@ class MeshTracker:
         bearing = None
         compass = None
         
-        # Use GPS position if available, otherwise use estimated position
-        node_lat = node.latitude
-        node_lon = node.longitude
-        position_type = "GPS"
+        # ONLY use estimated position for navigation, NOT last known GPS
+        node_lat = None
+        node_lon = None
+        position_type = None
         
-        if node_lat is None and node.estimated_position:
+        if node.estimated_position:
             node_lat, node_lon = node.estimated_position
             position_type = "ESTIMATED"
         
@@ -1107,22 +1107,23 @@ class MeshTracker:
             distance_table.add_row(Text("🎯 DIRECTION", style="bold cyan"))
             distance_table.add_row(Text(f"{compass}", style="bold white"))
             distance_table.add_row(Text(self.create_compass_visual(bearing), style="bold green"))
-            
-            # Add estimated position info if available
-            if node.estimated_position:
-                distance_table.add_row(Text("", style="dim"))
-                distance_table.add_row(Text("📍 FROM", style="bold magenta"))
-                if position_type == "ESTIMATED":
-                    distance_table.add_row(Text("Estimated Pos.", style="dim yellow"))
-                else:
-                    distance_table.add_row(Text("GPS Position", style="dim cyan"))
+            distance_table.add_row(Text("", style="dim"))
+            distance_table.add_row(Text("📍 FROM", style="bold magenta"))
+            distance_table.add_row(Text("Estimated Pos.", style="dim yellow"))
         else:
-            distance_table.add_row(Text("⏳ Calculating...", style="yellow"))
+            distance_table.add_row(Text("⚠️  No Current", style="bold yellow"))
+            distance_table.add_row(Text("Estimate", style="bold yellow"))
+            distance_table.add_row(Text("", style="dim"))
+            distance_table.add_row(Text("Navigation requires", style="dim white"))
+            distance_table.add_row(Text("estimated position", style="dim white"))
             distance_table.add_row(Text("", style="dim"))
             if not self.gps_data.fix:
-                distance_table.add_row(Text("Need GPS fix", style="dim white"))
-            elif not (node_lat and node_lon):
-                distance_table.add_row(Text("Need node position", style="dim white"))
+                distance_table.add_row(Text("⚠️  Need GPS fix", style="red"))
+                distance_table.add_row(Text("on Pi first", style="dim red"))
+            elif not node.estimated_position:
+                distance_table.add_row(Text("Waiting for RSSI", style="dim white"))
+                distance_table.add_row(Text("samples to build", style="dim white"))
+                distance_table.add_row(Text("position estimate", style="dim white"))
         
         distance_panel = Panel(distance_table, title="📍 Navigation", border_style="green", box=box.ROUNDED)
         
