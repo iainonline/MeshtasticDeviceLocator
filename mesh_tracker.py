@@ -85,6 +85,10 @@ class MeshNode:
         self.altitude: Optional[float] = None
         self.battery: Optional[int] = None
         self.packet_count: int = 0
+        # For position estimation
+        self.estimation_samples: List[dict] = []  # Store RSSI samples with GPS positions
+        self.estimated_position: Optional[Tuple[float, float]] = None
+        self.estimation_log: List[str] = []  # Log of estimation process
         
     def update(self, packet: dict):
         """Update node information from packet"""
@@ -171,6 +175,11 @@ class MeshTracker:
         self.nodes: Dict[str, MeshNode] = {}
         self.selected_node: Optional[str] = None
         self.mode = "list"  # "list" or "track"
+        
+        # Auto-selection
+        self.last_selected_file = "last_selected_node.txt"
+        self.startup_time = time.time()
+        self.auto_selected = False
         
         # Logging
         self.log_file = f"mesh_tracker_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jsonl"
@@ -317,23 +326,20 @@ class MeshTracker:
                                 'decoded': {}
                             }
                             
-                            # Extract user info
-                            if hasattr(node_info, 'user') and node_info.user:
+                            # Extract user info - node_info is a dict
+                            if 'user' in node_info and node_info['user']:
                                 user_dict = {}
-                                if hasattr(node_info['user'], 'shortName'):
-                                    user_dict['shortName'] = node_info['user'].get('shortName', 'Unknown')
-                                elif 'shortName' in node_info['user']:
-                                    user_dict['shortName'] = node_info['user']['shortName']
+                                user_data = node_info['user']
+                                if 'shortName' in user_data and user_data['shortName']:
+                                    user_dict['shortName'] = user_data['shortName']
+                                if 'longName' in user_data and user_data['longName']:
+                                    user_dict['longName'] = user_data['longName']
                                     
-                                if hasattr(node_info['user'], 'longName'):
-                                    user_dict['longName'] = node_info['user'].get('longName', 'Unknown')
-                                elif 'longName' in node_info['user']:
-                                    user_dict['longName'] = node_info['user']['longName']
-                                    
-                                fake_packet['user'] = user_dict
+                                if user_dict:
+                                    fake_packet['user'] = user_dict
                             
                             # Extract position
-                            if hasattr(node_info, 'position') and node_info.get('position'):
+                            if 'position' in node_info and node_info['position']:
                                 pos = node_info['position']
                                 lat = pos.get('latitudeI', 0)
                                 lon = pos.get('longitudeI', 0)
@@ -410,9 +416,27 @@ class MeshTracker:
                     if 'altitude' in pos:
                         node.altitude = pos['altitude']
             
-            # Extract signal info
+            # Extract signal info and collect for estimation
             if 'rxRssi' in packet:
                 node.rssi = packet['rxRssi']
+                # Collect RSSI sample if we have GPS fix
+                if self.gps_data.fix and node.latitude is None:
+                    sample = {
+                        'timestamp': time.time(),
+                        'rssi': packet['rxRssi'],
+                        'gps_lat': self.gps_data.latitude,
+                        'gps_lon': self.gps_data.longitude,
+                        'snr': packet.get('rxSnr', 0)
+                    }
+                    node.estimation_samples.append(sample)
+                    # Keep last 100 samples
+                    if len(node.estimation_samples) > 100:
+                        node.estimation_samples.pop(0)
+                    
+                    # Try to estimate position if we have enough samples
+                    if len(node.estimation_samples) >= 3:
+                        self.estimate_node_position(node)
+            
             if 'rxSnr' in packet:
                 node.snr = packet['rxSnr']
             
@@ -421,6 +445,67 @@ class MeshTracker:
             
         except Exception:
             pass
+    
+    def estimate_node_position(self, node: MeshNode):
+        """Estimate node position using RSSI triangulation"""
+        try:
+            samples = node.estimation_samples
+            if len(samples) < 3:
+                return
+            
+            # Add log entry
+            timestamp_str = datetime.now().strftime("%H:%M:%S")
+            node.estimation_log.append(f"{timestamp_str} - Collected {len(samples)} RSSI samples")
+            
+            # Simple weighted centroid based on signal strength
+            # Stronger signals (less negative RSSI) indicate closer proximity
+            total_weight = 0
+            weighted_lat = 0
+            weighted_lon = 0
+            
+            for sample in samples[-10:]:  # Use last 10 samples
+                # Convert RSSI to weight (stronger signal = higher weight)
+                # RSSI typically ranges from -120 (weak) to -30 (strong)
+                weight = 10 ** (sample['rssi'] / 20.0)  # Exponential weighting
+                weighted_lat += sample['gps_lat'] * weight
+                weighted_lon += sample['gps_lon'] * weight
+                total_weight += weight
+            
+            if total_weight > 0:
+                est_lat = weighted_lat / total_weight
+                est_lon = weighted_lon / total_weight
+                node.estimated_position = (est_lat, est_lon)
+                
+                node.estimation_log.append(f"{timestamp_str} - Estimated position: {est_lat:.6f}, {est_lon:.6f}")
+                node.estimation_log.append(f"{timestamp_str} - Using signal strength from {len(samples[-10:])} measurements")
+                node.estimation_log.append(f"{timestamp_str} - Average RSSI: {sum(s['rssi'] for s in samples[-10:]) / len(samples[-10:]):.1f} dBm")
+            
+            # Keep only last 5 log entries
+            if len(node.estimation_log) > 5:
+                node.estimation_log = node.estimation_log[-5:]
+                
+        except Exception:
+            pass
+    
+    def save_last_selected_node(self):
+        """Save the last selected node ID to file"""
+        try:
+            if self.selected_node:
+                with open(self.last_selected_file, 'w') as f:
+                    f.write(self.selected_node)
+        except Exception:
+            pass
+    
+    def load_last_selected_node(self) -> Optional[str]:
+        """Load the last selected node ID from file"""
+        try:
+            import os
+            if os.path.exists(self.last_selected_file):
+                with open(self.last_selected_file, 'r') as f:
+                    return f.read().strip()
+        except Exception:
+            pass
+        return None
     
     def log_data(self, data_type: str, data: dict):
         """Log data to file for ML analysis"""
@@ -470,9 +555,10 @@ class MeshTracker:
         node_table = Table(show_header=True, box=box.SIMPLE_HEAD, padding=(0, 1))
         node_table.add_column("#", style="cyan", width=3)
         node_table.add_column("Node ID", style="yellow", width=12)
-        node_table.add_column("Name", style="white", width=20)
-        node_table.add_column("Last Seen", style="white", width=10)
-        node_table.add_column("Packets", style="white", width=8)
+        node_table.add_column("Short Name", style="white", width=12)
+        node_table.add_column("Long Name", style="dim white", width=20)
+        node_table.add_column("Last", style="white", width=6)
+        node_table.add_column("Pkts", style="white", width=5)
         node_table.add_column("RSSI", style="white", width=6)
         
         sorted_nodes = sorted(self.nodes.values(), key=lambda n: n.last_seen, reverse=True)
@@ -482,10 +568,14 @@ class MeshTracker:
             age_str = f"{age}s" if age < 60 else f"{age//60}m"
             rssi_str = f"{node.rssi}" if node.rssi else "N/A"
             
+            # Truncate long name if too long
+            long_name = node.long_name[:20] if len(node.long_name) <= 20 else node.long_name[:17] + "..."
+            
             node_table.add_row(
                 str(idx),
                 node.node_id[:12],
-                node.short_name[:20],
+                node.short_name[:12],
+                long_name,
                 age_str,
                 str(node.packet_count),
                 rssi_str
@@ -525,9 +615,13 @@ class MeshTracker:
         
         node = self.nodes[self.selected_node]
         
-        # Header
+        # Header with both short and long names
+        header_text = f"📡 TRACKING: {node.short_name}"
+        if node.long_name and node.long_name != node.short_name and node.long_name != "Unknown":
+            header_text += f" ({node.long_name})"
+        header_text += f" [{node.node_id[:12]}]"
         header = Panel(
-            Text(f"📡 TRACKING: {node.short_name} ({node.node_id[:12]})", justify="center", style="bold green"),
+            Text(header_text, justify="center", style="bold green"),
             box=box.DOUBLE
         )
         
@@ -536,20 +630,29 @@ class MeshTracker:
         bearing = None
         compass = None
         
+        # Use GPS position if available, otherwise use estimated position
+        node_lat = node.latitude
+        node_lon = node.longitude
+        position_type = "GPS"
+        
+        if node_lat is None and node.estimated_position:
+            node_lat, node_lon = node.estimated_position
+            position_type = "ESTIMATED"
+        
         if (self.gps_data.fix and 
-            node.latitude is not None and 
-            node.longitude is not None):
+            node_lat is not None and 
+            node_lon is not None):
             distance = calculate_distance(
                 self.gps_data.latitude,
                 self.gps_data.longitude,
-                node.latitude,
-                node.longitude
+                node_lat,
+                node_lon
             )
             bearing = calculate_bearing(
                 self.gps_data.latitude,
                 self.gps_data.longitude,
-                node.latitude,
-                node.longitude
+                node_lat,
+                node_lon
             )
             compass = bearing_to_compass(bearing)
         
@@ -559,9 +662,20 @@ class MeshTracker:
         info_table.add_column("Value", style="white bold", width=30)
         
         if distance is not None:
-            info_table.add_row("DISTANCE", format_distance(distance))
+            dist_str = format_distance(distance)
+            if position_type == "ESTIMATED":
+                dist_str += " (via estimation)"
+            info_table.add_row("DISTANCE", dist_str)
         else:
-            info_table.add_row("DISTANCE", "Unknown - No position data")
+            # Show why we can't calculate distance
+            reason = ""
+            if not self.gps_data.fix:
+                reason = "No GPS fix on Pi"
+            elif node.latitude is None or node.longitude is None:
+                reason = "Node has no position data"
+            else:
+                reason = "Unknown"
+            info_table.add_row("DISTANCE", f"Unknown ({reason})")
         
         if bearing is not None and compass is not None:
             info_table.add_row("BEARING", f"{bearing:.1f}° ({compass})")
@@ -569,7 +683,7 @@ class MeshTracker:
             compass_visual = self.create_compass_visual(bearing)
             info_table.add_row("DIRECTION", compass_visual)
         else:
-            info_table.add_row("BEARING", "Unknown - No position data")
+            info_table.add_row("BEARING", "Waiting for position data...")
         
         info_panel = Panel(info_table, title="Navigation", border_style="green", box=box.DOUBLE)
         
@@ -587,10 +701,32 @@ class MeshTracker:
             detail_table.add_row("RSSI", f"{node.rssi} dBm")
         if node.snr:
             detail_table.add_row("SNR", f"{node.snr:.1f} dB")
+        
+        # Show position - either from GPS or estimated
         if node.latitude and node.longitude:
-            detail_table.add_row("Node Position", f"{node.latitude:.6f}, {node.longitude:.6f}")
+            detail_table.add_row("Node Position (GPS)", f"{node.latitude:.6f}, {node.longitude:.6f}")
+            if node.altitude:
+                detail_table.add_row("Node Altitude", f"{node.altitude:.1f}m")
+        elif node.estimated_position:
+            est_lat, est_lon = node.estimated_position
+            detail_table.add_row("Position (ESTIMATED)", f"{est_lat:.6f}, {est_lon:.6f}")
+            detail_table.add_row("Samples Used", str(len(node.estimation_samples)))
+        else:
+            detail_table.add_row("Node Position", "⚠️  No GPS")
+            if self.gps_data.fix:
+                detail_table.add_row("Estimation Status", f"Collecting data... ({len(node.estimation_samples)} samples)")
+            else:
+                detail_table.add_row("Estimation Status", "Need GPS fix on Pi to start")
         
         detail_panel = Panel(detail_table, title="Node Details", border_style="blue")
+        
+        # Estimation log panel (only if estimating)
+        estimation_panel = None
+        if not node.latitude and not node.longitude and node.estimation_log:
+            log_text = Text()
+            for log_entry in node.estimation_log[-5:]:
+                log_text.append(log_entry + "\n", style="dim white")
+            estimation_panel = Panel(log_text, title="📍 Position Estimation Log", border_style="yellow")
         
         # Your GPS
         gps_table = Table(show_header=False, box=box.SIMPLE, padding=(0, 1))
@@ -607,24 +743,35 @@ class MeshTracker:
         
         gps_panel = Panel(gps_table, title="Your GPS", border_style="yellow")
         
-        # Instructions
+        # Instructions - make more prominent
         instructions = Text()
+        instructions.append("📍 ", style="bold cyan")
         instructions.append("Press ", style="white")
-        instructions.append("B", style="bold yellow")
-        instructions.append(" to go back  |  ", style="white")
-        instructions.append("Q", style="bold yellow")
-        instructions.append(" to quit", style="white")
+        instructions.append("B", style="bold yellow on blue")
+        instructions.append(" to go BACK to node list  |  Press ", style="white")
+        instructions.append("Q", style="bold yellow on red")
+        instructions.append(" to QUIT", style="white")
         
-        instr_panel = Panel(instructions, border_style="dim")
+        instr_panel = Panel(instructions, border_style="bold yellow", title="⌨️  Controls")
         
-        # Combine
-        layout.split_column(
-            Layout(header, size=3),
-            Layout(info_panel, size=10),
-            Layout(detail_panel, size=10),
-            Layout(gps_panel, size=8),
-            Layout(instr_panel, size=3)
-        )
+        # Combine - add estimation panel if available
+        if estimation_panel:
+            layout.split_column(
+                Layout(header, size=3),
+                Layout(info_panel, size=9),
+                Layout(detail_panel, size=9),
+                Layout(estimation_panel, size=7),
+                Layout(gps_panel, size=7),
+                Layout(instr_panel, size=3)
+            )
+        else:
+            layout.split_column(
+                Layout(header, size=3),
+                Layout(info_panel, size=10),
+                Layout(detail_panel, size=10),
+                Layout(gps_panel, size=8),
+                Layout(instr_panel, size=3)
+            )
         
         return layout
     
@@ -648,21 +795,68 @@ class MeshTracker:
             self.console.print("[cyan]Starting Meshtastic receiver...[/cyan]")
             self.start_meshtastic_receiver()
             
-            time.sleep(2)  # Give threads time to start
+            time.sleep(3)  # Give threads time to start and populate nodeDB
             
-            # Main display loop
-            with Live(self.generate_node_list_view(), refresh_per_second=2, console=self.console) as live:
-                while self.running:
-                    try:
-                        if self.mode == "list":
-                            live.update(self.generate_node_list_view())
-                        elif self.mode == "track":
-                            live.update(self.generate_tracking_view())
-                        
-                        time.sleep(0.5)
-                        
-                    except KeyboardInterrupt:
-                        break
+            # Main display loop with keyboard input
+            import sys
+            import select
+            import termios
+            import tty
+            
+            # Set terminal to raw mode for immediate key capture
+            old_settings = termios.tcgetattr(sys.stdin)
+            try:
+                tty.setcbreak(sys.stdin.fileno())
+                
+                with Live(self.generate_node_list_view(), refresh_per_second=2, console=self.console, screen=True) as live:
+                    while self.running:
+                        try:
+                            # Auto-select last node after 10 seconds if user hasn't done anything
+                            if (not self.auto_selected and 
+                                time.time() - self.startup_time > 10 and 
+                                self.mode == "list" and 
+                                len(self.nodes) > 0):
+                                last_node_id = self.load_last_selected_node()
+                                if last_node_id and last_node_id in self.nodes:
+                                    self.selected_node = last_node_id
+                                    self.mode = "track"
+                                    self.auto_selected = True
+                            
+                            # Update display
+                            if self.mode == "list":
+                                live.update(self.generate_node_list_view())
+                            elif self.mode == "track":
+                                live.update(self.generate_tracking_view())
+                            
+                            # Check for keyboard input (non-blocking)
+                            rlist, _, _ = select.select([sys.stdin], [], [], 0.1)
+                            if rlist:
+                                key = sys.stdin.read(1)
+                                
+                                if key.lower() == 'q':
+                                    break
+                                elif key.lower() == 'b' and self.mode == "track":
+                                    self.mode = "list"
+                                    self.selected_node = None
+                                elif key.isdigit() and self.mode == "list":
+                                    # Select node by number
+                                    idx = int(key) - 1
+                                    if 0 <= idx < min(9, len(self.nodes)):
+                                        sorted_nodes = sorted(self.nodes.keys(), 
+                                                            key=lambda k: self.nodes[k].last_seen, 
+                                                            reverse=True)
+                                        if idx < len(sorted_nodes):
+                                            self.selected_node = sorted_nodes[idx]
+                                            self.mode = "track"
+                                            self.save_last_selected_node()
+                                            self.auto_selected = True  # Prevent auto-select after manual selection
+                            
+                            time.sleep(0.3)
+                            
+                        except KeyboardInterrupt:
+                            break
+            finally:
+                termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_settings)
             
         except Exception as e:
             self.console.print(f"[red]Error: {e}[/red]")
