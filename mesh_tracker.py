@@ -582,15 +582,30 @@ class MeshTracker:
             pass
     
     def estimate_node_position(self, node: MeshNode):
-        """Estimate node position using RSSI triangulation"""
+        """Estimate node position using RSSI triangulation with verbose logging"""
         try:
             samples = node.estimation_samples
             if len(samples) < 3:
+                timestamp_str = datetime.now().strftime("%H:%M:%S")
+                node.estimation_log.append(f"{timestamp_str} - Need 3 samples minimum, currently have {len(samples)}")
+                if len(node.estimation_log) > 10:
+                    node.estimation_log = node.estimation_log[-10:]
                 return
             
-            # Add log entry
+            # Add verbose log entries
             timestamp_str = datetime.now().strftime("%H:%M:%S")
-            node.estimation_log.append(f"{timestamp_str} - Collected {len(samples)} RSSI samples")
+            
+            # Log sample collection
+            node.estimation_log.append(f"{timestamp_str} - Processing {len(samples)} total RSSI samples from receiver")
+            
+            # Calculate RSSI statistics for last 10 samples
+            recent_samples = samples[-10:]
+            rssi_values = [s['rssi'] for s in recent_samples]
+            min_rssi = min(rssi_values)
+            max_rssi = max(rssi_values)
+            avg_rssi = sum(rssi_values) / len(rssi_values)
+            
+            node.estimation_log.append(f"{timestamp_str} - RSSI range: {min_rssi:.1f} to {max_rssi:.1f} dBm (avg: {avg_rssi:.1f} dBm)")
             
             # Simple weighted centroid based on signal strength
             # Stronger signals (less negative RSSI) indicate closer proximity
@@ -598,7 +613,9 @@ class MeshTracker:
             weighted_lat = 0
             weighted_lon = 0
             
-            for sample in samples[-10:]:  # Use last 10 samples
+            node.estimation_log.append(f"{timestamp_str} - Applying exponential RSSI weighting algorithm...")
+            
+            for sample in recent_samples:
                 # Convert RSSI to weight (stronger signal = higher weight)
                 # RSSI typically ranges from -120 (weak) to -30 (strong)
                 weight = 10 ** (sample['rssi'] / 20.0)  # Exponential weighting
@@ -609,18 +626,31 @@ class MeshTracker:
             if total_weight > 0:
                 est_lat = weighted_lat / total_weight
                 est_lon = weighted_lon / total_weight
+                
+                # Calculate change from previous estimate
+                change_msg = ""
+                if node.estimated_position:
+                    old_lat, old_lon = node.estimated_position
+                    lat_change = abs(est_lat - old_lat) * 111000  # degrees to meters (approx)
+                    lon_change = abs(est_lon - old_lon) * 111000 * 0.8  # rough adjustment
+                    change_m = (lat_change**2 + lon_change**2)**0.5
+                    change_ft = change_m * 3.28084
+                    change_msg = f" (moved {change_ft:.1f}ft from last estimate)"
+                
                 node.estimated_position = (est_lat, est_lon)
                 
-                node.estimation_log.append(f"{timestamp_str} - Estimated position: {est_lat:.6f}, {est_lon:.6f}")
-                node.estimation_log.append(f"{timestamp_str} - Using signal strength from {len(samples[-10:])} measurements")
-                node.estimation_log.append(f"{timestamp_str} - Average RSSI: {sum(s['rssi'] for s in samples[-10:]) / len(samples[-10:]):.1f} dBm")
+                node.estimation_log.append(f"{timestamp_str} - ✓ Position calculated: {est_lat:.6f}, {est_lon:.6f}{change_msg}")
+                node.estimation_log.append(f"{timestamp_str} - Used {len(recent_samples)} weighted measurements, total weight: {total_weight:.4f}")
             
-            # Keep only last 5 log entries
-            if len(node.estimation_log) > 5:
-                node.estimation_log = node.estimation_log[-5:]
+            # Keep only last 10 log entries
+            if len(node.estimation_log) > 10:
+                node.estimation_log = node.estimation_log[-10:]
                 
-        except Exception:
-            pass
+        except Exception as e:
+            timestamp_str = datetime.now().strftime("%H:%M:%S")
+            node.estimation_log.append(f"{timestamp_str} - ⚠️ Estimation error: {str(e)}")
+            if len(node.estimation_log) > 10:
+                node.estimation_log = node.estimation_log[-10:]
     
     def save_last_selected_node(self):
         """Save the last selected node ID to file"""
@@ -1063,6 +1093,39 @@ class MeshTracker:
         
         est_position_panel = Panel(est_position_table, title="🎯 Estimated Position & Algorithm", border_style="magenta", box=box.ROUNDED)
         
+        # Distance & Compass panel (right side)
+        distance_table = Table(show_header=False, box=box.SIMPLE, padding=(0, 1))
+        distance_table.add_column("Info", style="white", width=30)
+        
+        if distance is not None and bearing is not None and compass is not None:
+            distance_table.add_row(Text("📏 DISTANCE", style="bold cyan"))
+            distance_table.add_row(Text(format_distance(distance), style="bold green"))
+            distance_table.add_row(Text("", style="dim"))
+            distance_table.add_row(Text("🧭 BEARING", style="bold cyan"))
+            distance_table.add_row(Text(f"{bearing:.1f}°", style="bold yellow"))
+            distance_table.add_row(Text("", style="dim"))
+            distance_table.add_row(Text("🎯 DIRECTION", style="bold cyan"))
+            distance_table.add_row(Text(f"{compass}", style="bold white"))
+            distance_table.add_row(Text(self.create_compass_visual(bearing), style="bold green"))
+            
+            # Add estimated position info if available
+            if node.estimated_position:
+                distance_table.add_row(Text("", style="dim"))
+                distance_table.add_row(Text("📍 FROM", style="bold magenta"))
+                if position_type == "ESTIMATED":
+                    distance_table.add_row(Text("Estimated Pos.", style="dim yellow"))
+                else:
+                    distance_table.add_row(Text("GPS Position", style="dim cyan"))
+        else:
+            distance_table.add_row(Text("⏳ Calculating...", style="yellow"))
+            distance_table.add_row(Text("", style="dim"))
+            if not self.gps_data.fix:
+                distance_table.add_row(Text("Need GPS fix", style="dim white"))
+            elif not (node_lat and node_lon):
+                distance_table.add_row(Text("Need node position", style="dim white"))
+        
+        distance_panel = Panel(distance_table, title="📍 Navigation", border_style="green", box=box.ROUNDED)
+        
         # Your GPS
         gps_table = Table(show_header=False, box=box.SIMPLE, padding=(0, 1))
         gps_table.add_column("Key", style="cyan")
@@ -1093,12 +1156,19 @@ class MeshTracker:
         
         instr_panel = Panel(instructions, border_style="bold yellow", title="⌨️  Controls")
         
+        # Create a horizontal layout for estimation and distance panels
+        estimation_row = Layout()
+        estimation_row.split_row(
+            Layout(est_position_panel, ratio=2),
+            Layout(distance_panel, ratio=1)
+        )
+        
         # Layout with estimated position panel always visible
         layout.split_column(
             Layout(header, size=3),
             Layout(info_panel, size=9),
             Layout(detail_panel, size=9),
-            Layout(est_position_panel, size=9),
+            Layout(estimation_row, size=10),
             Layout(gps_panel, size=7),
             Layout(instr_panel, size=3)
         )
