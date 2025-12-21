@@ -1,0 +1,85 @@
+
+================================================================================
+Screen capture at 2025-12-21 10:12:58
+================================================================================
+Mode: list
+GPS Fix: True
+GPS Lat/Lon: 35.96839693333333, -115.08139835
+Total Nodes: 186
+Selected Node: None
+
+================================================================================
+Screen capture at 2025-12-21 10:13:03
+================================================================================
+Mode: track
+GPS Fix: True
+GPS Lat/Lon: 35.96839693333333, -115.08139833333334
+Total Nodes: 186
+Selected Node: !9e757a8c
+
+Tracked Node Details:
+  ID: !9e757a8c
+  Short Name: 7a8c
+  RSSI: None
+  SNR: None
+  Signal History Length: 0
+  Last 3 signal entries: []
+  Trend (10s): None
+  Trend (60s): None
+
+================================================================================
+Screen capture at 2025-12-21 10:13:08
+================================================================================
+Mode: track
+GPS Fix: True
+GPS Lat/Lon: 35.96839693333333, -115.08139835
+Total Nodes: 186
+Selected Node: !9e757a8c
+
+Tracked Node Details:
+  ID: !9e757a8c
+  Short Name: 7a8c
+  RSSI: None
+  SNR: None
+  Signal History Length: 0
+  Last 3 signal entries: []
+  Trend (10s): None
+  Trend (60s): None
+
+================================================================================
+Screen capture at 2025-12-21 10:13:14
+================================================================================
+Mode: track
+GPS Fix: True
+GPS Lat/Lon: 35.96839693333333, -115.08139833333334
+Total Nodes: 186
+Selected Node: !9e757a8c
+
+Tracked Node Details:
+  ID: !9e757a8c
+  Short Name: 7a8c
+  RSSI: None
+  SNR: None
+  Signal History Length: 0
+  Last 3 signal entries: []
+  Trend (10s): None
+  Trend (60s): None
+
+================================================================================
+Screen capture at 2025-12-21 10:13:21
+================================================================================
+Mode: track
+GPS Fix: True
+GPS Lat/Lon: 35.96839693333333, -115.08139833333334
+Total Nodes: 186
+Selected Node: !9e757a8c
+
+Tracked Node Details:
+  ID: !9e757a8c
+  Short Name: 7a8c
+  RSSI: None
+  SNR: None
+  Signal History Length: 0
+  Last 3 signal entries: []
+  Trend (10s): None
+  Trend (60s): None

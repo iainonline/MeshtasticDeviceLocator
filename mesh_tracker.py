@@ -240,10 +240,11 @@ def format_distance(meters: float) -> str:
 class MeshTracker:
     """Main application for tracking mesh nodes"""
     
-    def __init__(self, gps_port: int = 2947, meshtastic_port: Optional[str] = None):
+    def __init__(self, gps_port: int = 2947, meshtastic_port: Optional[str] = None, debug: bool = False):
         self.console = Console()
         self.gps_port = gps_port
         self.meshtastic_port = meshtastic_port
+        self.debug = debug
         
         # Data storage
         self.gps_data = GPSData()
@@ -260,7 +261,10 @@ class MeshTracker:
         self.auto_selected = False
         
         # Logging
-        self.log_file = f"mesh_tracker_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jsonl"
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        self.log_file = f'mesh_tracker_{timestamp}.jsonl'
+        self.debug_log_file = f'mesh_tracker_debug_{timestamp}.log' if debug else None
+        self.screen_capture_file = f'mesh_tracker_screen_{timestamp}.txt' if debug else None
         
         # Threading
         self.running = False
@@ -452,6 +456,27 @@ class MeshTracker:
     def handle_mesh_packet(self, packet: dict):
         """Handle incoming Meshtastic packet"""
         try:
+            # Debug: Log raw packet structure
+            if self.debug:
+                self.debug_log(f"\n=== RAW PACKET ===")
+                self.debug_log(f"Type: {type(packet)}")
+                self.debug_log(f"Keys: {list(packet.keys()) if isinstance(packet, dict) else 'Not a dict'}")
+                self.debug_log(f"Full packet: {packet}")
+                
+                # Check for various possible RSSI/SNR field names
+                rssi_fields = ['rxRssi', 'rssi', 'rxrssi', 'RSSI', 'signal']
+                snr_fields = ['rxSnr', 'snr', 'rxsnr', 'SNR']
+                
+                self.debug_log(f"\nLooking for RSSI in: {rssi_fields}")
+                for field in rssi_fields:
+                    if field in packet:
+                        self.debug_log(f"  FOUND {field}: {packet[field]}")
+                
+                self.debug_log(f"\nLooking for SNR in: {snr_fields}")
+                for field in snr_fields:
+                    if field in packet:
+                        self.debug_log(f"  FOUND {field}: {packet[field]}")
+            
             # Extract node ID
             node_id = None
             if 'fromId' in packet:
@@ -460,11 +485,15 @@ class MeshTracker:
                 node_id = str(packet['from']) if not isinstance(packet['from'], str) else packet['from']
             
             if not node_id:
+                self.debug_log(f"No node_id found in packet")
                 return
+            
+            self.debug_log(f"Processing packet from node: {node_id}")
             
             # Update or create node
             if node_id not in self.nodes:
                 self.nodes[node_id] = MeshNode(node_id)
+                self.debug_log(f"Created new node: {node_id}")
             
             node = self.nodes[node_id]
             
@@ -493,18 +522,27 @@ class MeshTracker:
                         node.altitude = pos['altitude']
             
             # Extract signal info and collect for estimation
-            if 'rxRssi' in packet:
-                node.rssi = packet['rxRssi']
+            # Try multiple possible field names for RSSI
+            rssi_value = None
+            for field in ['rxRssi', 'rssi', 'rxrssi']:
+                if field in packet:
+                    rssi_value = packet[field]
+                    break
+            
+            if rssi_value is not None:
+                node.rssi = rssi_value
+                self.debug_log(f"Set RSSI to {rssi_value} for node {node_id}")
                 # Collect RSSI sample if we have GPS fix
                 if self.gps_data.fix and node.latitude is None:
                     sample = {
                         'timestamp': time.time(),
-                        'rssi': packet['rxRssi'],
+                        'rssi': rssi_value,
                         'gps_lat': self.gps_data.latitude,
                         'gps_lon': self.gps_data.longitude,
-                        'snr': packet.get('rxSnr', 0)
+                        'snr': packet.get('rxSnr', packet.get('snr', 0))
                     }
                     node.estimation_samples.append(sample)
+                    self.debug_log(f"Added estimation sample for {node_id}")
                     # Keep last 100 samples
                     if len(node.estimation_samples) > 100:
                         node.estimation_samples.pop(0)
@@ -512,12 +550,28 @@ class MeshTracker:
                     # Try to estimate position if we have enough samples
                     if len(node.estimation_samples) >= 3:
                         self.estimate_node_position(node)
+            else:
+                self.debug_log(f"WARNING: No RSSI found in packet from {node_id}")
             
-            if 'rxSnr' in packet:
-                node.snr = packet['rxSnr']
+            # Try multiple possible field names for SNR
+            snr_value = None
+            for field in ['rxSnr', 'snr', 'rxsnr']:
+                if field in packet:
+                    snr_value = packet[field]
+                    break
+            
+            if snr_value is not None:
+                node.snr = snr_value
+                self.debug_log(f"Set SNR to {snr_value} for node {node_id}")
             
             # Update node with tracking data (includes signal history)
             node.update(packet, self.gps_data)
+            
+            # Debug: Check if signal history was updated
+            if self.debug:
+                self.debug_log(f"Node {node_id} signal history length: {len(node.signal_history)}")
+                if len(node.signal_history) > 0:
+                    self.debug_log(f"Latest signal history entry: {node.signal_history[-1]}")
             
             # Log packet
             self.log_data('mesh', packet)
@@ -585,6 +639,17 @@ class MeshTracker:
         except Exception:
             pass
         return None
+    
+    def debug_log(self, message: str):
+        """Log debug messages"""
+        if not self.debug or not self.debug_log_file:
+            return
+        try:
+            timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')
+            with open(self.debug_log_file, 'a') as f:
+                f.write(f"[{timestamp}] {message}\n")
+        except Exception:
+            pass
     
     def log_data(self, data_type: str, data: dict):
         """Log data to file for ML analysis"""
@@ -849,9 +914,11 @@ class MeshTracker:
         
         if distance is not None:
             dist_str = format_distance(distance)
+            # Show which position source was used for calculation
             if position_type == "ESTIMATED":
-                dist_str += " (via estimation)"
-            info_table.add_row("DISTANCE", dist_str)
+                info_table.add_row("DISTANCE", f"{dist_str} (using estimated location)")
+            else:
+                info_table.add_row("DISTANCE", f"{dist_str} (using GPS location)")
         else:
             # Show why we can't calculate distance
             reason = ""
@@ -925,21 +992,24 @@ class MeshTracker:
         if node.snr:
             detail_table.add_row("SNR", f"{node.snr:.1f} dB")
         
-        # Show position - either from GPS or estimated
+        # Show position - both GPS and estimated if available
         if node.latitude and node.longitude:
-            detail_table.add_row("Node Position (GPS)", f"{node.latitude:.6f}, {node.longitude:.6f}")
+            detail_table.add_row("Last GPS Location", f"{node.latitude:.6f}, {node.longitude:.6f}")
             if node.altitude:
-                detail_table.add_row("Node Altitude", f"{node.altitude:.1f}m")
-        elif node.estimated_position:
-            est_lat, est_lon = node.estimated_position
-            detail_table.add_row("Position (ESTIMATED)", f"{est_lat:.6f}, {est_lon:.6f}")
-            detail_table.add_row("Samples Used", str(len(node.estimation_samples)))
+                detail_table.add_row("GPS Altitude", f"{node.altitude:.1f}m")
         else:
-            detail_table.add_row("Node Position", "⚠️  No GPS")
-            if self.gps_data.fix:
-                detail_table.add_row("Estimation Status", f"Collecting data... ({len(node.estimation_samples)} samples)")
-            else:
-                detail_table.add_row("Estimation Status", "Need GPS fix on Pi to start")
+            detail_table.add_row("Last GPS Location", "⚠️  No GPS data from node")
+        
+        # Always show estimated position if we have one
+        if node.estimated_position:
+            est_lat, est_lon = node.estimated_position
+            detail_table.add_row("Estimated Location", f"{est_lat:.6f}, {est_lon:.6f}")
+            detail_table.add_row("Estimation Samples", str(len(node.estimation_samples)))
+        elif self.gps_data.fix and not (node.latitude and node.longitude):
+            # Only show estimation status if node doesn't have GPS
+            detail_table.add_row("Estimated Location", f"Collecting data... ({len(node.estimation_samples)} samples)")
+        elif not self.gps_data.fix and not (node.latitude and node.longitude):
+            detail_table.add_row("Estimated Location", "Need GPS fix on Pi to start")
         
         detail_panel = Panel(detail_table, title="Node Details", border_style="blue")
         
@@ -1006,6 +1076,45 @@ class MeshTracker:
         arrow = arrows[index]
         return f"{arrow} {arrow} {arrow}"
     
+    def capture_screen_state(self):
+        """Capture current screen state for debugging"""
+        if not self.debug or not self.screen_capture_file:
+            return
+        try:
+            timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            
+            # Build debug info
+            debug_info = []
+            debug_info.append(f"\n{'='*80}")
+            debug_info.append(f"Screen capture at {timestamp}")
+            debug_info.append(f"{'='*80}")
+            debug_info.append(f"Mode: {self.mode}")
+            debug_info.append(f"GPS Fix: {self.gps_data.fix}")
+            debug_info.append(f"GPS Lat/Lon: {self.gps_data.latitude}, {self.gps_data.longitude}")
+            debug_info.append(f"Total Nodes: {len(self.nodes)}")
+            debug_info.append(f"Selected Node: {self.selected_node}")
+            
+            if self.selected_node and self.selected_node in self.nodes:
+                node = self.nodes[self.selected_node]
+                debug_info.append(f"\nTracked Node Details:")
+                debug_info.append(f"  ID: {node.node_id}")
+                debug_info.append(f"  Short Name: {node.short_name}")
+                debug_info.append(f"  RSSI: {node.rssi}")
+                debug_info.append(f"  SNR: {node.snr}")
+                debug_info.append(f"  Signal History Length: {len(node.signal_history)}")
+                debug_info.append(f"  Last 3 signal entries: {node.signal_history[-3:] if len(node.signal_history) >= 3 else node.signal_history}")
+                
+                # Show trends
+                trend_10s = node.get_signal_trend(10)
+                trend_60s = node.get_signal_trend(60)
+                debug_info.append(f"  Trend (10s): {trend_10s}")
+                debug_info.append(f"  Trend (60s): {trend_60s}")
+            
+            with open(self.screen_capture_file, 'a') as f:
+                f.write('\n'.join(debug_info) + '\n')
+        except Exception as e:
+            self.debug_log(f"Error capturing screen: {e}")
+    
     def run(self):
         """Run the main application"""
         try:
@@ -1028,6 +1137,8 @@ class MeshTracker:
             
             # Set terminal to raw mode for immediate key capture
             old_settings = termios.tcgetattr(sys.stdin)
+            capture_counter = 0
+            
             try:
                 tty.setcbreak(sys.stdin.fileno())
                 
@@ -1039,9 +1150,22 @@ class MeshTracker:
                                 time.time() - self.startup_time > 10 and 
                                 self.mode == "list" and 
                                 len(self.nodes) > 0):
-                                last_node_id = self.load_last_selected_node()
-                                if last_node_id and last_node_id in self.nodes:
-                                    self.selected_node = last_node_id
+                                # Prefer nodes with signal history (actively transmitting)
+                                nodes_with_signal = [n for n in self.nodes.values() if len(n.signal_history) > 0]
+                                
+                                if nodes_with_signal:
+                                    # Select most recently seen node with signal data
+                                    selected = max(nodes_with_signal, key=lambda n: n.last_seen)
+                                    self.selected_node = selected.node_id
+                                    self.debug_log(f"Auto-selected node with signal data: {self.selected_node}")
+                                else:
+                                    # Fall back to last saved node
+                                    last_node_id = self.load_last_selected_node()
+                                    if last_node_id and last_node_id in self.nodes:
+                                        self.selected_node = last_node_id
+                                        self.debug_log(f"Auto-selected last saved node: {self.selected_node}")
+                                
+                                if self.selected_node:
                                     self.mode = "track"
                                     self.auto_selected = True
                             
@@ -1050,6 +1174,13 @@ class MeshTracker:
                                 live.update(self.generate_node_list_view())
                             elif self.mode == "track":
                                 live.update(self.generate_tracking_view())
+                            
+                            # Capture screen periodically in debug mode
+                            if self.debug:
+                                capture_counter += 1
+                                if capture_counter >= 10:  # Every ~2 seconds
+                                    self.capture_screen_state()
+                                    capture_counter = 0
                             
                             # Check for keyboard input (non-blocking)
                             rlist, _, _ = select.select([sys.stdin], [], [], 0.1)
@@ -1111,13 +1242,25 @@ def main():
         type=str,
         help='Serial port for Meshtastic device (auto-detect if not specified)'
     )
+    parser.add_argument(
+        '--debug',
+        action='store_true',
+        help='Enable debug logging and screen capture'
+    )
     
     args = parser.parse_args()
     
     console = Console()
     console.clear()
     
-    tracker = MeshTracker(gps_port=args.gps_port, meshtastic_port=args.meshtastic_port)
+    if args.debug:
+        console.print("[yellow]Debug mode enabled[/yellow]")
+    
+    tracker = MeshTracker(gps_port=args.gps_port, meshtastic_port=args.meshtastic_port, debug=args.debug)
+    
+    if args.debug:
+        console.print(f"[yellow]Debug log: {tracker.debug_log_file}[/yellow]")
+        console.print(f"[yellow]Screen capture: {tracker.screen_capture_file}[/yellow]")
     
     try:
         tracker.run()
