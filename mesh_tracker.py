@@ -89,10 +89,13 @@ class MeshNode:
         self.estimation_samples: List[dict] = []  # Store RSSI samples with GPS positions
         self.estimated_position: Optional[Tuple[float, float]] = None
         self.estimation_log: List[str] = []  # Log of estimation process
+        # For signal tracking (hotter/colder)
+        self.signal_history: List[dict] = []  # Timestamped RSSI/SNR history with GPS positions
         
-    def update(self, packet: dict):
+    def update(self, packet: dict, gps_data: Optional['GPSData'] = None):
         """Update node information from packet"""
-        self.last_seen = time.time()
+        current_time = time.time()
+        self.last_seen = current_time
         self.packet_count += 1
         
         if 'fromId' in packet:
@@ -104,6 +107,78 @@ class MeshNode:
                 self.short_name = user.shortName
             if hasattr(user, 'longName'):
                 self.long_name = user.longName
+        
+        # Record signal history with GPS position for tracking
+        if self.rssi is not None:
+            history_entry = {
+                'timestamp': current_time,
+                'rssi': self.rssi,
+                'snr': self.snr,
+                'latitude': gps_data.latitude if gps_data and gps_data.fix else None,
+                'longitude': gps_data.longitude if gps_data and gps_data.fix else None
+            }
+            self.signal_history.append(history_entry)
+            # Keep only last 30 minutes of history
+            cutoff_time = current_time - 1800
+            self.signal_history = [h for h in self.signal_history if h['timestamp'] > cutoff_time]
+    
+    def get_signal_trend(self, time_window: int) -> Optional[str]:
+        """Get signal trend over specified time window in seconds
+        Returns: 'hotter', 'colder', 'stable', or None if insufficient data
+        """
+        if len(self.signal_history) < 2:
+            return None
+        
+        current_time = time.time()
+        cutoff_time = current_time - time_window
+        
+        # Get recent readings
+        recent_readings = [h for h in self.signal_history if h['timestamp'] > cutoff_time]
+        
+        if len(recent_readings) < 2:
+            return None
+        
+        # Compare average of first half vs second half
+        mid_point = len(recent_readings) // 2
+        first_half = recent_readings[:mid_point]
+        second_half = recent_readings[mid_point:]
+        
+        avg_first = sum(h['rssi'] for h in first_half) / len(first_half)
+        avg_second = sum(h['rssi'] for h in second_half) / len(second_half)
+        
+        # RSSI is negative, so higher (less negative) is better
+        diff = avg_second - avg_first
+        
+        # Threshold for "significant" change (3 dBm)
+        if diff > 3:
+            return 'hotter'
+        elif diff < -3:
+            return 'colder'
+        else:
+            return 'stable'
+    
+    def get_signal_strength_change(self, time_window: int) -> Optional[float]:
+        """Get the actual dBm change over the time window"""
+        if len(self.signal_history) < 2:
+            return None
+        
+        current_time = time.time()
+        cutoff_time = current_time - time_window
+        
+        recent_readings = [h for h in self.signal_history if h['timestamp'] > cutoff_time]
+        
+        if len(recent_readings) < 2:
+            return None
+        
+        # Compare average of first half vs second half
+        mid_point = len(recent_readings) // 2
+        first_half = recent_readings[:mid_point]
+        second_half = recent_readings[mid_point:]
+        
+        avg_first = sum(h['rssi'] for h in first_half) / len(first_half)
+        avg_second = sum(h['rssi'] for h in second_half) / len(second_half)
+        
+        return avg_second - avg_first
 
 
 def calculate_distance(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
@@ -389,8 +464,6 @@ class MeshTracker:
                 self.nodes[node_id] = MeshNode(node_id)
             
             node = self.nodes[node_id]
-            node.last_seen = time.time()
-            node.packet_count += 1
             
             # Extract user info if available
             if 'user' in packet:
@@ -439,6 +512,9 @@ class MeshTracker:
             
             if 'rxSnr' in packet:
                 node.snr = packet['rxSnr']
+            
+            # Update node with tracking data (includes signal history)
+            node.update(packet, self.gps_data)
             
             # Log packet
             self.log_data('mesh', packet)
@@ -661,6 +737,38 @@ class MeshTracker:
         info_table.add_column("Key", style="cyan", width=20)
         info_table.add_column("Value", style="white bold", width=30)
         
+        # Signal Tracking Panel - Show hotter/colder trends
+        tracking_info = []
+        
+        # Get trends for different time windows
+        trend_10s = node.get_signal_trend(10)
+        trend_60s = node.get_signal_trend(60)
+        trend_5m = node.get_signal_trend(300)
+        
+        change_10s = node.get_signal_strength_change(10)
+        change_60s = node.get_signal_strength_change(60)
+        change_5m = node.get_signal_strength_change(300)
+        
+        def get_trend_emoji(trend):
+            if trend == 'hotter':
+                return '🔥'
+            elif trend == 'colder':
+                return '🧊'
+            elif trend == 'stable':
+                return '➡️'
+            else:
+                return '⏳'
+        
+        def get_trend_style(trend):
+            if trend == 'hotter':
+                return 'bold green'
+            elif trend == 'colder':
+                return 'bold blue'
+            elif trend == 'stable':
+                return 'yellow'
+            else:
+                return 'dim white'
+        
         if distance is not None:
             dist_str = format_distance(distance)
             if position_type == "ESTIMATED":
@@ -685,7 +793,27 @@ class MeshTracker:
         else:
             info_table.add_row("BEARING", "Waiting for position data...")
         
-        info_panel = Panel(info_table, title="Navigation", border_style="green", box=box.DOUBLE)
+        # Add signal tracking trends
+        info_table.add_row("", "")  # Spacer
+        if trend_10s:
+            change_str = f"{change_10s:+.1f} dBm" if change_10s else ""
+            info_table.add_row(f"Last 10 seconds {get_trend_emoji(trend_10s)}", 
+                             Text(f"{trend_10s.upper()} {change_str}", style=get_trend_style(trend_10s)))
+        
+        if trend_60s:
+            change_str = f"{change_60s:+.1f} dBm" if change_60s else ""
+            info_table.add_row(f"Last 60 seconds {get_trend_emoji(trend_60s)}", 
+                             Text(f"{trend_60s.upper()} {change_str}", style=get_trend_style(trend_60s)))
+        
+        if trend_5m:
+            change_str = f"{change_5m:+.1f} dBm" if change_5m else ""
+            info_table.add_row(f"Last 5 minutes {get_trend_emoji(trend_5m)}", 
+                             Text(f"{trend_5m.upper()} {change_str}", style=get_trend_style(trend_5m)))
+        
+        if not trend_10s and not trend_60s and not trend_5m:
+            info_table.add_row("Signal Trend", Text("Collecting data...", style="dim white"))
+        
+        info_panel = Panel(info_table, title="Navigation & Signal Tracking", border_style="green", box=box.DOUBLE)
         
         # Node details
         detail_table = Table(show_header=False, box=box.SIMPLE, padding=(0, 1))

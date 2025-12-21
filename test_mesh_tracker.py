@@ -73,19 +73,112 @@ class TestMeshNode(unittest.TestCase):
         self.assertEqual(node.long_name, "Unknown")
         self.assertIsNone(node.rssi)
         self.assertEqual(node.packet_count, 0)
+        self.assertEqual(len(node.signal_history), 0)
     
     def test_node_update(self):
         """Test node updates from packet"""
         node = mesh_tracker.MeshNode("!9e7656a8")
+        node.rssi = -50  # Set RSSI before update
         initial_time = node.last_seen
         
         time.sleep(0.1)
         
+        gps_data = mesh_tracker.GPSData()
+        gps_data.latitude = 35.968400
+        gps_data.longitude = -115.081402
+        gps_data.fix = True
+        
         packet = {'fromId': '!9e7656a8'}
-        node.update(packet)
+        node.update(packet, gps_data)
         
         self.assertGreater(node.last_seen, initial_time)
         self.assertEqual(node.packet_count, 1)
+        # Should have recorded signal history
+        self.assertEqual(len(node.signal_history), 1)
+        self.assertEqual(node.signal_history[0]['rssi'], -50)
+
+
+class TestSignalTracking(unittest.TestCase):
+    """Test signal tracking and hotter/colder functionality"""
+    
+    def test_signal_trend_insufficient_data(self):
+        """Test signal trend with insufficient data"""
+        node = mesh_tracker.MeshNode("!test")
+        trend = node.get_signal_trend(10)
+        self.assertIsNone(trend)
+    
+    def test_signal_trend_hotter(self):
+        """Test signal getting stronger (hotter)"""
+        node = mesh_tracker.MeshNode("!test")
+        current_time = time.time()
+        
+        # Simulate signal getting stronger over time
+        for i in range(10):
+            node.signal_history.append({
+                'timestamp': current_time + i,
+                'rssi': -80 + (i * 2),  # Signal improving from -80 to -62
+                'snr': 5.0,
+                'latitude': 35.0,
+                'longitude': -115.0
+            })
+        
+        trend = node.get_signal_trend(10)
+        self.assertEqual(trend, 'hotter')
+    
+    def test_signal_trend_colder(self):
+        """Test signal getting weaker (colder)"""
+        node = mesh_tracker.MeshNode("!test")
+        current_time = time.time()
+        
+        # Simulate signal getting weaker over time
+        for i in range(10):
+            node.signal_history.append({
+                'timestamp': current_time + i,
+                'rssi': -60 - (i * 2),  # Signal degrading from -60 to -78
+                'snr': 5.0,
+                'latitude': 35.0,
+                'longitude': -115.0
+            })
+        
+        trend = node.get_signal_trend(10)
+        self.assertEqual(trend, 'colder')
+    
+    def test_signal_trend_stable(self):
+        """Test stable signal"""
+        node = mesh_tracker.MeshNode("!test")
+        current_time = time.time()
+        
+        # Simulate stable signal
+        for i in range(10):
+            node.signal_history.append({
+                'timestamp': current_time + i,
+                'rssi': -70,  # Constant signal
+                'snr': 5.0,
+                'latitude': 35.0,
+                'longitude': -115.0
+            })
+        
+        trend = node.get_signal_trend(10)
+        self.assertEqual(trend, 'stable')
+    
+    def test_signal_strength_change(self):
+        """Test signal strength change calculation"""
+        node = mesh_tracker.MeshNode("!test")
+        current_time = time.time()
+        
+        # Add signal samples
+        for i in range(10):
+            node.signal_history.append({
+                'timestamp': current_time + i,
+                'rssi': -80 + (i * 2),
+                'snr': 5.0,
+                'latitude': 35.0,
+                'longitude': -115.0
+            })
+        
+        change = node.get_signal_strength_change(10)
+        self.assertIsNotNone(change)
+        self.assertGreater(change, 0)  # Signal improved
 
 
 class TestDistanceCalculations(unittest.TestCase):
