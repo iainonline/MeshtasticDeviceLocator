@@ -230,11 +230,13 @@ def bearing_to_compass(bearing: float) -> str:
 
 
 def format_distance(meters: float) -> str:
-    """Format distance in human-readable form"""
-    if meters < 1000:
-        return f"{meters:.1f}m"
+    """Format distance in human-readable form (feet/miles)"""
+    feet = meters * 3.28084
+    if feet < 5280:  # Less than 1 mile
+        return f"{feet:.1f}ft"
     else:
-        return f"{meters/1000:.2f}km"
+        miles = feet / 5280
+        return f"{miles:.2f}mi"
 
 
 class MeshTracker:
@@ -761,12 +763,17 @@ class MeshTracker:
         gps_table.add_column("Value", style="white")
         
         if self.gps_data.fix:
-            gps_table.add_row("GPS", f"✓ FIX ({self.gps_data.satellites or 0} sats)")
+            sats = self.gps_data.satellites or 0
+            gps_table.add_row("GPS", f"✓ FIX ({sats} sats)")
             gps_table.add_row("Position", f"{self.gps_data.latitude:.6f}, {self.gps_data.longitude:.6f}")
             if self.gps_data.altitude:
                 gps_table.add_row("Altitude", f"{self.gps_data.altitude:.1f}ft")
+            # Warn about GPS accuracy
+            if sats < 6:
+                gps_table.add_row("⚠️  Warning", "Low satellite count - position may be inaccurate")
         else:
             gps_table.add_row("GPS", "✗ NO FIX")
+            gps_table.add_row("⚠️  Warning", "No GPS fix - cannot calculate distance/bearing")
         
         gps_panel = Panel(gps_table, title="GPS Status", border_style="green")
         
@@ -996,20 +1003,42 @@ class MeshTracker:
         if node.latitude and node.longitude:
             detail_table.add_row("Last GPS Location", f"{node.latitude:.6f}, {node.longitude:.6f}")
             if node.altitude:
-                detail_table.add_row("GPS Altitude", f"{node.altitude:.1f}m")
+                altitude_ft = node.altitude * 3.28084
+                detail_table.add_row("GPS Altitude", f"{altitude_ft:.1f}ft")
         else:
             detail_table.add_row("Last GPS Location", "⚠️  No GPS data from node")
         
-        # Always show estimated position if we have one
+        detail_panel = Panel(detail_table, title="Node Details", border_style="blue")
+        
+        # Estimated Position Panel (separate section)
+        est_table = Table(show_header=False, box=box.SIMPLE, padding=(0, 1))
+        est_table.add_column("Key", style="cyan")
+        est_table.add_column("Value", style="white")
+        
         if node.estimated_position:
             est_lat, est_lon = node.estimated_position
-            detail_table.add_row("Estimated Location", f"{est_lat:.6f}, {est_lon:.6f}")
-            detail_table.add_row("Estimation Samples", str(len(node.estimation_samples)))
+            est_table.add_row("Estimated Location", f"{est_lat:.6f}, {est_lon:.6f}")
+            est_table.add_row("Samples Collected", str(len(node.estimation_samples)))
+            est_table.add_row("Confidence", "Medium" if len(node.estimation_samples) >= 10 else "Low")
+            
+            # Show recent estimation log
+            if node.estimation_log:
+                est_table.add_row("Latest Update", "")
+                for log_entry in node.estimation_log[-3:]:
+                    est_table.add_row("", log_entry)
         elif self.gps_data.fix and not (node.latitude and node.longitude):
             # Only show estimation status if node doesn't have GPS
-            detail_table.add_row("Estimated Location", f"Collecting data... ({len(node.estimation_samples)} samples)")
-        elif not self.gps_data.fix and not (node.latitude and node.longitude):
-            detail_table.add_row("Estimated Location", "Need GPS fix on Pi to start")
+            est_table.add_row("Status", f"Collecting RSSI data... ({len(node.estimation_samples)} samples)")
+            est_table.add_row("Required", "Minimum 3 samples needed")
+            if len(node.estimation_samples) > 0:
+                est_table.add_row("Progress", f"{len(node.estimation_samples)}/3")
+        elif not self.gps_data.fix:
+            est_table.add_row("Status", "⚠️  Need GPS fix on Pi to start")
+            est_table.add_row("Info", "Move to area with clear sky view")
+        else:
+            est_table.add_row("Status", "Node has GPS - estimation not needed")
+        
+        est_panel = Panel(est_table, title="📍 Position Estimation", border_style="magenta")
         
         detail_panel = Panel(detail_table, title="Node Details", border_style="blue")
         
@@ -1028,11 +1057,15 @@ class MeshTracker:
         
         if self.gps_data.fix:
             gps_table.add_row("Your Position", f"{self.gps_data.latitude:.6f}, {self.gps_data.longitude:.6f}")
-            gps_table.add_row("Satellites", str(self.gps_data.satellites or 0))
+            sats = self.gps_data.satellites or 0
+            gps_table.add_row("Satellites", str(sats))
+            if sats < 6:
+                gps_table.add_row("⚠️  Accuracy", "Low - position may be aged or inaccurate")
             if self.gps_data.altitude:
                 gps_table.add_row("Altitude", f"{self.gps_data.altitude:.1f}ft")
         else:
             gps_table.add_row("Status", "⚠️  NO GPS FIX")
+            gps_table.add_row("Note", "Cannot calculate distance/bearing")
         
         gps_panel = Panel(gps_table, title="Your GPS", border_style="yellow")
         

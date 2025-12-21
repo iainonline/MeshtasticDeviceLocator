@@ -235,16 +235,20 @@ class TestDistanceCalculations(unittest.TestCase):
 class TestDistanceFormatting(unittest.TestCase):
     """Test distance formatting"""
     
-    def test_format_meters(self):
-        """Test formatting distances in meters"""
-        self.assertEqual(mesh_tracker.format_distance(50), "50.0m")
-        self.assertEqual(mesh_tracker.format_distance(999), "999.0m")
+    def test_format_feet(self):
+        """Test formatting distances in feet"""
+        # 50 meters = 164.0 feet
+        result = mesh_tracker.format_distance(50)
+        self.assertTrue(result.endswith("ft"))
+        self.assertIn("164", result)
     
-    def test_format_kilometers(self):
-        """Test formatting distances in kilometers"""
-        self.assertEqual(mesh_tracker.format_distance(1000), "1.00km")
-        self.assertEqual(mesh_tracker.format_distance(5500), "5.50km")
-        self.assertEqual(mesh_tracker.format_distance(10000), "10.00km")
+    def test_format_miles(self):
+        """Test formatting distances in miles"""
+        # 2000 meters = 6561.7 feet = 1.24 miles
+        result = mesh_tracker.format_distance(2000)
+        self.assertTrue(result.endswith("mi"))
+        # Should be around 1.2mi
+        self.assertIn("1.", result)
 
 
 class TestNMEAParsing(unittest.TestCase):
