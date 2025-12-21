@@ -534,8 +534,8 @@ class MeshTracker:
             if rssi_value is not None:
                 node.rssi = rssi_value
                 self.debug_log(f"Set RSSI to {rssi_value} for node {node_id}")
-                # Collect RSSI sample if we have GPS fix
-                if self.gps_data.fix and node.latitude is None:
+                # Collect RSSI sample if we have GPS fix - ALWAYS collect for estimation
+                if self.gps_data.fix:
                     sample = {
                         'timestamp': time.time(),
                         'rssi': rssi_value,
@@ -549,7 +549,7 @@ class MeshTracker:
                     if len(node.estimation_samples) > 100:
                         node.estimation_samples.pop(0)
                     
-                    # Try to estimate position if we have enough samples
+                    # Try to estimate position if we have enough samples - ALWAYS estimate
                     if len(node.estimation_samples) >= 3:
                         self.estimate_node_position(node)
             else:
@@ -1014,12 +1014,30 @@ class MeshTracker:
         est_position_table = Table(show_header=False, box=box.SIMPLE, padding=(0, 1))
         est_position_table.add_column("Info", style="white", width=70)
         
-        if node.estimated_position or (not node.latitude and not node.longitude and len(node.estimation_samples) > 0):
+        # Always show estimation if we have samples or estimated position
+        if node.estimated_position or len(node.estimation_samples) > 0:
             # Show estimated position if available
             if node.estimated_position:
                 est_lat, est_lon = node.estimated_position
                 est_position_table.add_row(Text(f"📍 Estimated: {est_lat:.6f}, {est_lon:.6f}", style="bold green"))
-                est_position_table.add_row(Text(f"Confidence: {'Medium' if len(node.estimation_samples) >= 10 else 'Low'} ({len(node.estimation_samples)} RSSI samples)", style="yellow"))
+                
+                # If node has GPS, show comparison
+                if node.latitude and node.longitude:
+                    # Calculate distance between GPS and estimated position
+                    from math import radians, sin, cos, sqrt, atan2
+                    R = 6371000  # Earth radius in meters
+                    lat1, lon1 = radians(node.latitude), radians(node.longitude)
+                    lat2, lon2 = radians(est_lat), radians(est_lon)
+                    dlat = lat2 - lat1
+                    dlon = lon2 - lon1
+                    a = sin(dlat/2)**2 + cos(lat1) * cos(lat2) * sin(dlon/2)**2
+                    c = 2 * atan2(sqrt(a), sqrt(1-a))
+                    distance_m = R * c
+                    distance_ft = distance_m * 3.28084
+                    est_position_table.add_row(Text(f"GPS Actual: {node.latitude:.6f}, {node.longitude:.6f}", style="cyan"))
+                    est_position_table.add_row(Text(f"Accuracy: ±{distance_ft:.1f}ft from GPS", style="yellow"))
+                
+                est_position_table.add_row(Text(f"Confidence: {'Medium' if len(node.estimation_samples) >= 10 else 'Low'} ({len(node.estimation_samples)} RSSI samples)", style="dim yellow"))
             else:
                 est_position_table.add_row(Text(f"⏳ Calculating... ({len(node.estimation_samples)} samples collected)", style="yellow"))
             
@@ -1031,21 +1049,17 @@ class MeshTracker:
                 for log_entry in node.estimation_log[-5:]:
                     est_position_table.add_row(Text(f"  {log_entry}", style="dim white"))
             else:
-                est_position_table.add_row(Text("Waiting for RSSI samples to calculate position...", style="dim white"))
-        elif not node.latitude and not node.longitude:
-            # Node has no GPS and we're trying to estimate
-            est_position_table.add_row(Text("🎯 Position Estimation Active", style="bold cyan"))
-            est_position_table.add_row(Text(f"Status: Collecting RSSI samples ({len(node.estimation_samples)}/3 minimum)", style="yellow"))
+                est_position_table.add_row(Text("Collecting RSSI data for estimation...", style="dim white"))
+        else:
+            # No samples yet
+            est_position_table.add_row(Text("🎯 Position Estimation Initializing", style="bold cyan"))
+            est_position_table.add_row(Text(f"Status: Waiting for RSSI data (0/3 minimum)", style="yellow"))
             est_position_table.add_row(Text("", style="dim"))
             if self.gps_data.fix:
                 est_position_table.add_row(Text("Algorithm: Weighted RSSI triangulation", style="dim white"))
                 est_position_table.add_row(Text("Waiting for node to transmit packets...", style="dim white"))
             else:
                 est_position_table.add_row(Text("⚠️  GPS fix required on Pi to start estimation", style="bold red"))
-        else:
-            # Node has GPS, no estimation needed
-            est_position_table.add_row(Text("✓ Node has GPS coordinates", style="bold green"))
-            est_position_table.add_row(Text("Position estimation not needed", style="dim white"))
         
         est_position_panel = Panel(est_position_table, title="🎯 Estimated Position & Algorithm", border_style="magenta", box=box.ROUNDED)
         
