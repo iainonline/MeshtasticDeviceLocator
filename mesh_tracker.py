@@ -1010,45 +1010,44 @@ class MeshTracker:
         
         detail_panel = Panel(detail_table, title="Node Details", border_style="blue")
         
-        # Estimated Position Panel (separate section)
-        est_table = Table(show_header=False, box=box.SIMPLE, padding=(0, 1))
-        est_table.add_column("Key", style="cyan")
-        est_table.add_column("Value", style="white")
+        # Dedicated Estimated Position Panel with rolling algorithm updates
+        est_position_table = Table(show_header=False, box=box.SIMPLE, padding=(0, 1))
+        est_position_table.add_column("Info", style="white", width=70)
         
-        if node.estimated_position:
-            est_lat, est_lon = node.estimated_position
-            est_table.add_row("Estimated Location", f"{est_lat:.6f}, {est_lon:.6f}")
-            est_table.add_row("Samples Collected", str(len(node.estimation_samples)))
-            est_table.add_row("Confidence", "Medium" if len(node.estimation_samples) >= 10 else "Low")
+        if node.estimated_position or (not node.latitude and not node.longitude and len(node.estimation_samples) > 0):
+            # Show estimated position if available
+            if node.estimated_position:
+                est_lat, est_lon = node.estimated_position
+                est_position_table.add_row(Text(f"📍 Estimated: {est_lat:.6f}, {est_lon:.6f}", style="bold green"))
+                est_position_table.add_row(Text(f"Confidence: {'Medium' if len(node.estimation_samples) >= 10 else 'Low'} ({len(node.estimation_samples)} RSSI samples)", style="yellow"))
+            else:
+                est_position_table.add_row(Text(f"⏳ Calculating... ({len(node.estimation_samples)} samples collected)", style="yellow"))
             
-            # Show recent estimation log
-            if node.estimation_log:
-                est_table.add_row("Latest Update", "")
-                for log_entry in node.estimation_log[-3:]:
-                    est_table.add_row("", log_entry)
-        elif self.gps_data.fix and not (node.latitude and node.longitude):
-            # Only show estimation status if node doesn't have GPS
-            est_table.add_row("Status", f"Collecting RSSI data... ({len(node.estimation_samples)} samples)")
-            est_table.add_row("Required", "Minimum 3 samples needed")
-            if len(node.estimation_samples) > 0:
-                est_table.add_row("Progress", f"{len(node.estimation_samples)}/3")
-        elif not self.gps_data.fix:
-            est_table.add_row("Status", "⚠️  Need GPS fix on Pi to start")
-            est_table.add_row("Info", "Move to area with clear sky view")
+            est_position_table.add_row(Text("", style="dim"))  # Spacer
+            
+            # Show rolling 5-line algorithm updates
+            if node.estimation_log and len(node.estimation_log) > 0:
+                est_position_table.add_row(Text("Algorithm Updates (last 5):", style="cyan"))
+                for log_entry in node.estimation_log[-5:]:
+                    est_position_table.add_row(Text(f"  {log_entry}", style="dim white"))
+            else:
+                est_position_table.add_row(Text("Waiting for RSSI samples to calculate position...", style="dim white"))
+        elif not node.latitude and not node.longitude:
+            # Node has no GPS and we're trying to estimate
+            est_position_table.add_row(Text("🎯 Position Estimation Active", style="bold cyan"))
+            est_position_table.add_row(Text(f"Status: Collecting RSSI samples ({len(node.estimation_samples)}/3 minimum)", style="yellow"))
+            est_position_table.add_row(Text("", style="dim"))
+            if self.gps_data.fix:
+                est_position_table.add_row(Text("Algorithm: Weighted RSSI triangulation", style="dim white"))
+                est_position_table.add_row(Text("Waiting for node to transmit packets...", style="dim white"))
+            else:
+                est_position_table.add_row(Text("⚠️  GPS fix required on Pi to start estimation", style="bold red"))
         else:
-            est_table.add_row("Status", "Node has GPS - estimation not needed")
+            # Node has GPS, no estimation needed
+            est_position_table.add_row(Text("✓ Node has GPS coordinates", style="bold green"))
+            est_position_table.add_row(Text("Position estimation not needed", style="dim white"))
         
-        est_panel = Panel(est_table, title="📍 Position Estimation", border_style="magenta")
-        
-        detail_panel = Panel(detail_table, title="Node Details", border_style="blue")
-        
-        # Estimation log panel (only if estimating)
-        estimation_panel = None
-        if not node.latitude and not node.longitude and node.estimation_log:
-            log_text = Text()
-            for log_entry in node.estimation_log[-5:]:
-                log_text.append(log_entry + "\n", style="dim white")
-            estimation_panel = Panel(log_text, title="📍 Position Estimation Log", border_style="yellow")
+        est_position_panel = Panel(est_position_table, title="🎯 Estimated Position & Algorithm", border_style="magenta", box=box.ROUNDED)
         
         # Your GPS
         gps_table = Table(show_header=False, box=box.SIMPLE, padding=(0, 1))
@@ -1080,24 +1079,15 @@ class MeshTracker:
         
         instr_panel = Panel(instructions, border_style="bold yellow", title="⌨️  Controls")
         
-        # Combine - add estimation panel if available
-        if estimation_panel:
-            layout.split_column(
-                Layout(header, size=3),
-                Layout(info_panel, size=9),
-                Layout(detail_panel, size=9),
-                Layout(estimation_panel, size=7),
-                Layout(gps_panel, size=7),
-                Layout(instr_panel, size=3)
-            )
-        else:
-            layout.split_column(
-                Layout(header, size=3),
-                Layout(info_panel, size=10),
-                Layout(detail_panel, size=10),
-                Layout(gps_panel, size=8),
-                Layout(instr_panel, size=3)
-            )
+        # Layout with estimated position panel always visible
+        layout.split_column(
+            Layout(header, size=3),
+            Layout(info_panel, size=9),
+            Layout(detail_panel, size=9),
+            Layout(est_position_panel, size=9),
+            Layout(gps_panel, size=7),
+            Layout(instr_panel, size=3)
+        )
         
         return layout
     
