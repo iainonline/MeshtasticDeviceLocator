@@ -27,14 +27,28 @@ class GPSReaderUDP:
     def connect(self):
         """Create UDP socket"""
         try:
-            print(f"Setting up UDP listener for GPSd at {self.host}:{self.port}...")
+            # Get this device's IP address
+            import subprocess
+            result = subprocess.run(['hostname', '-I'], capture_output=True, text=True)
+            pi_ip = result.stdout.strip().split()[0] if result.stdout else 'unknown'
+            
+            print("=" * 70)
+            print("📡 GPS RECEIVER READY")
+            print("=" * 70)
+            print(f"\n🔧 Please configure GPSd Forwarder on your Android phone:")
+            print(f"   • Server IP: {pi_ip}")
+            print(f"   • Port: {self.port}")
+            print(f"   • Protocol: UDP")
+            print(f"   • Then start the service\n")
+            print("=" * 70)
+            print(f"Listening on port {self.port}...")
+            print(f"Waiting for GPS data...\n")
+            
             self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             # Bind to all interfaces to receive UDP packets
             self.sock.bind(('0.0.0.0', self.port))
             self.sock.settimeout(5.0)  # 5 second timeout
-            print(f"Listening for UDP packets on port {self.port}...")
-            print(f"Waiting for data from {self.host}...\n")
             return True
         except Exception as e:
             print(f"Setup failed: {e}")
