@@ -1306,23 +1306,14 @@ class MeshTracker:
             box=box.DOUBLE
         )
         
-        # Calculate distance and bearing if we have positions
+        # Calculate distance and bearing ONLY from estimated position (triangulated)
         distance = None
         bearing = None
         compass = None
         
-        # Use GPS position if available, otherwise use estimated position
-        node_lat = node.latitude
-        node_lon = node.longitude
-        position_type = "GPS"
-        
-        if node_lat is None and node.estimated_position:
+        # ONLY use estimated position - this is the whole point of triangulation
+        if (self.gps_data.fix and node.estimated_position):
             node_lat, node_lon = node.estimated_position
-            position_type = "ESTIMATED"
-        
-        if (self.gps_data.fix and 
-            node_lat is not None and 
-            node_lon is not None):
             distance = calculate_distance(
                 self.gps_data.latitude,
                 self.gps_data.longitude,
@@ -1337,15 +1328,12 @@ class MeshTracker:
             )
             compass = bearing_to_compass(bearing)
         
-        # Main info panel
+        # Main info panel - Navigation only (no signal tracking)
         info_table = Table(show_header=False, box=box.SIMPLE, padding=(0, 2))
         info_table.add_column("Key", style="cyan", width=20)
         info_table.add_column("Value", style="white bold", width=30)
         
-        # Signal Tracking Panel - Show hotter/colder trends
-        tracking_info = []
-        
-        # Get trends for different time windows
+        # Get signal trend data (will be used in Estimated Position panel)
         trend_10s = node.get_signal_trend(10)
         trend_60s = node.get_signal_trend(60)
         trend_5m = node.get_signal_trend(300)
@@ -1376,18 +1364,14 @@ class MeshTracker:
         
         if distance is not None:
             dist_str = format_distance(distance)
-            # Show which position source was used for calculation
-            if position_type == "ESTIMATED":
-                info_table.add_row("DISTANCE", f"{dist_str} (using estimated location)")
-            else:
-                info_table.add_row("DISTANCE", f"{dist_str} (using GPS location)")
+            info_table.add_row("DISTANCE", f"{dist_str} (from estimated position)")
         else:
             # Show why we can't calculate distance
             reason = ""
             if not self.gps_data.fix:
                 reason = "No GPS fix on Pi"
-            elif node.latitude is None or node.longitude is None:
-                reason = "Node has no position data"
+            elif not node.estimated_position:
+                reason = "No estimated position yet"
             else:
                 reason = "Unknown"
             info_table.add_row("DISTANCE", f"Unknown ({reason})")
@@ -1398,27 +1382,7 @@ class MeshTracker:
             compass_visual = self.create_compass_visual(bearing)
             info_table.add_row("DIRECTION", compass_visual)
         else:
-            info_table.add_row("BEARING", "Waiting for position data...")
-        
-        # Add signal tracking trends
-        info_table.add_row("", "")  # Spacer
-        if trend_10s:
-            change_str = f"{change_10s:+.1f} dBm" if change_10s else ""
-            info_table.add_row(f"Last 10 seconds {get_trend_emoji(trend_10s)}", 
-                             Text(f"{trend_10s.upper()} {change_str}", style=get_trend_style(trend_10s)))
-        
-        if trend_60s:
-            change_str = f"{change_60s:+.1f} dBm" if change_60s else ""
-            info_table.add_row(f"Last 60 seconds {get_trend_emoji(trend_60s)}", 
-                             Text(f"{trend_60s.upper()} {change_str}", style=get_trend_style(trend_60s)))
-        
-        if trend_5m:
-            change_str = f"{change_5m:+.1f} dBm" if change_5m else ""
-            info_table.add_row(f"Last 5 minutes {get_trend_emoji(trend_5m)}", 
-                             Text(f"{trend_5m.upper()} {change_str}", style=get_trend_style(trend_5m)))
-        
-        if not trend_10s and not trend_60s and not trend_5m:
-            info_table.add_row("Signal Trend", Text("Collecting data...", style="dim white"))
+            info_table.add_row("BEARING", "Waiting for estimated position...")
         
         # Add target node movement status
         info_table.add_row("", "")  # Spacer
@@ -1437,7 +1401,7 @@ class MeshTracker:
             else:
                 info_table.add_row("Your Status", Text("🚗 You are moving", style="dim yellow"))
         
-        info_panel = Panel(info_table, title="Navigation & Signal Tracking", border_style="green", box=box.DOUBLE)
+        info_panel = Panel(info_table, title="Navigation", border_style="green", box=box.DOUBLE)
         
         # Node details
         detail_table = Table(show_header=False, box=box.SIMPLE, padding=(0, 1))
@@ -1465,7 +1429,7 @@ class MeshTracker:
         
         detail_panel = Panel(detail_table, title="Node Details", border_style="blue")
         
-        # Dedicated Estimated Position Panel with rolling algorithm updates
+        # Dedicated Estimated Position Panel with signal tracking and rolling algorithm updates
         est_position_table = Table(show_header=False, box=box.SIMPLE, padding=(0, 1))
         est_position_table.add_column("Info", style="white", width=70)
         
@@ -1495,6 +1459,28 @@ class MeshTracker:
                 est_position_table.add_row(Text(f"Confidence: {'Medium' if len(node.estimation_samples) >= 10 else 'Low'} ({len(node.estimation_samples)} RSSI samples)", style="dim yellow"))
             else:
                 est_position_table.add_row(Text(f"⏳ Collecting data... ({len(node.estimation_samples)}/3 samples minimum)", style="yellow"))
+            
+            est_position_table.add_row(Text("", style="dim"))  # Spacer
+            
+            # Add signal tracking trends - 3 separate lines
+            est_position_table.add_row(Text("Signal Tracking:", style="bold cyan"))
+            if trend_10s:
+                change_str = f" {change_10s:+.1f} dBm" if change_10s else ""
+                est_position_table.add_row(Text(f"  Last 10 seconds: {get_trend_emoji(trend_10s)} {trend_10s.upper()}{change_str}", style=get_trend_style(trend_10s)))
+            else:
+                est_position_table.add_row(Text("  Last 10 seconds: ⏳ Collecting data...", style="dim white"))
+            
+            if trend_60s:
+                change_str = f" {change_60s:+.1f} dBm" if change_60s else ""
+                est_position_table.add_row(Text(f"  Last 1 minute:   {get_trend_emoji(trend_60s)} {trend_60s.upper()}{change_str}", style=get_trend_style(trend_60s)))
+            else:
+                est_position_table.add_row(Text("  Last 1 minute:   ⏳ Collecting data...", style="dim white"))
+            
+            if trend_5m:
+                change_str = f" {change_5m:+.1f} dBm" if change_5m else ""
+                est_position_table.add_row(Text(f"  Last 5 minutes:  {get_trend_emoji(trend_5m)} {trend_5m.upper()}{change_str}", style=get_trend_style(trend_5m)))
+            else:
+                est_position_table.add_row(Text("  Last 5 minutes:  ⏳ Collecting data...", style="dim white"))
             
             est_position_table.add_row(Text("", style="dim"))  # Spacer
             
@@ -1571,10 +1557,7 @@ class MeshTracker:
             # Add estimated position info
             distance_table.add_row(Text("", style="dim"))
             distance_table.add_row(Text("📍 FROM", style="bold magenta"))
-            if position_type == "ESTIMATED":
-                distance_table.add_row(Text("Estimated Pos.", style="dim yellow"))
-            else:
-                distance_table.add_row(Text("GPS Position", style="dim cyan"))
+            distance_table.add_row(Text("Estimated Position", style="dim yellow"))
         else:
             # No navigation data until first position estimate
             distance_table.add_row(Text("⏳ Awaiting Position", style="yellow"))
@@ -1584,8 +1567,6 @@ class MeshTracker:
                 distance_table.add_row(Text("position estimate", style="dim white"))
             elif not self.gps_data.fix:
                 distance_table.add_row(Text("Need GPS fix", style="dim white"))
-            elif not (node_lat and node_lon):
-                distance_table.add_row(Text("Need node position", style="dim white"))
         
         distance_panel = Panel(distance_table, title="📍 Navigation", border_style="green", box=box.ROUNDED)
         
