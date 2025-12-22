@@ -44,14 +44,15 @@ def parse_nmea_coordinate(coord_str: str, direction: str) -> Optional[float]:
         if dot_pos == -1:
             return None
         
-        # For latitude: DD (2 digits) + MM.MMMM
-        # For longitude: DDD (3 digits) + MM.MMMM
-        if len(coord_str) <= 9:  # Latitude
-            degrees = int(coord_str[:2])
-            minutes = float(coord_str[2:])
-        else:  # Longitude
-            degrees = int(coord_str[:3])
-            minutes = float(coord_str[3:])
+        # For latitude: DDMM.MMMM (degrees = 2 digits before minutes)
+        # For longitude: DDDMM.MMMM (degrees = 3 digits before minutes)
+        # Minutes are always the last 2 digits before decimal + fractional part
+        if dot_pos <= 4:  # Latitude (format: DDMM.MMMM, dot at position 4)
+            degrees = int(coord_str[:dot_pos-2])
+            minutes = float(coord_str[dot_pos-2:])
+        else:  # Longitude (format: DDDMM.MMMM, dot at position 5)
+            degrees = int(coord_str[:dot_pos-2])
+            minutes = float(coord_str[dot_pos-2:])
         
         decimal = degrees + (minutes / 60.0)
         
@@ -60,7 +61,8 @@ def parse_nmea_coordinate(coord_str: str, direction: str) -> Optional[float]:
             decimal = -decimal
             
         return decimal
-    except (ValueError, IndexError):
+    except (ValueError, IndexError) as e:
+        print(f"[ERROR] Coordinate parse error: {e} for '{coord_str}'")
         return None
 
 
@@ -271,7 +273,19 @@ class MeshTrackerGUI:
                  path_loss_exp=2.5, tx_power=14.0, freq_mhz=915.0):
         self.root = root
         self.root.title("Meshtastic Node Tracker")
-        self.root.geometry("1200x800")
+        
+        # Set reasonable window size (fits most screens)
+        window_width = 1000
+        window_height = 650
+        
+        # Center the window on screen
+        screen_width = root.winfo_screenwidth()
+        screen_height = root.winfo_screenheight()
+        x = (screen_width - window_width) // 2
+        y = (screen_height - window_height) // 2
+        
+        self.root.geometry(f"{window_width}x{window_height}+{x}+{y}")
+        self.root.minsize(800, 500)  # Set minimum size
         
         self.gps_port = gps_port
         self.meshtastic_port = meshtastic_port
@@ -288,12 +302,25 @@ class MeshTrackerGUI:
         # Map markers
         self.tracker_marker = None
         self.target_marker = None
+        self.last_marker_position = None  # Track last marker position to reduce flicker
         
         self.setup_gui()
         self.start_background_threads()
         
     def setup_gui(self):
         """Setup the GUI layout"""
+        # Create menu bar
+        menubar = tk.Menu(self.root)
+        self.root.config(menu=menubar)
+        
+        # File menu
+        file_menu = tk.Menu(menubar, tearoff=0)
+        menubar.add_cascade(label="File", menu=file_menu)
+        file_menu.add_command(label="Quit", command=self.quit_app, accelerator="Ctrl+Q")
+        
+        # Bind Ctrl+Q
+        self.root.bind('<Control-q>', lambda e: self.quit_app())
+        
         # Create main container
         main_frame = ttk.Frame(self.root)
         main_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
@@ -325,10 +352,30 @@ class MeshTrackerGUI:
         info_frame = ttk.LabelFrame(right_frame, text="Tracking Information", padding=10)
         info_frame.pack(fill=tk.X, pady=(0, 5))
         
-        self.info_text = scrolledtext.ScrolledText(info_frame, height=10, 
+        self.info_text = scrolledtext.ScrolledText(info_frame, height=8, 
                                                     font=('Courier', 9),
                                                     wrap=tk.WORD)
         self.info_text.pack(fill=tk.BOTH, expand=True)
+        
+        # Add mesh traffic log below info panel
+        traffic_frame = ttk.LabelFrame(right_frame, text="Mesh Traffic", padding=5)
+        traffic_frame.pack(fill=tk.X, pady=(0, 5))
+        
+        self.traffic_text = scrolledtext.ScrolledText(traffic_frame, height=4, 
+                                                       font=('Courier', 8),
+                                                       wrap=tk.WORD,
+                                                       state='disabled')
+        self.traffic_text.pack(fill=tk.BOTH, expand=True)
+        
+        # Add calculation progress log
+        calc_frame = ttk.LabelFrame(right_frame, text="Position Calculation Progress", padding=5)
+        calc_frame.pack(fill=tk.X, pady=(0, 5))
+        
+        self.calc_text = scrolledtext.ScrolledText(calc_frame, height=4, 
+                                                    font=('Courier', 8),
+                                                    wrap=tk.WORD,
+                                                    state='disabled')
+        self.calc_text.pack(fill=tk.BOTH, expand=True)
         
         # Middle: Map
         map_frame = ttk.LabelFrame(right_frame, text="Map View", padding=5)
@@ -388,16 +435,11 @@ class MeshTrackerGUI:
                 # Check if it's NMEA format (starts with $)
                 if raw_data.startswith('$'):
                     self.parse_nmea_sentence(raw_data)
-                    # Update map if we have a fix
-                    if self.gps_data.fix:
-                        self.update_tracker_position()
                 else:
                     # Try JSON format
                     try:
                         nmea_data = json.loads(raw_data)
                         self.gps_data.update_from_nmea(nmea_data)
-                        if self.gps_data.fix:
-                            self.update_tracker_position()
                     except json.JSONDecodeError:
                         continue
                     
@@ -497,7 +539,25 @@ class MeshTrackerGUI:
             if self.mesh_interface and hasattr(self.mesh_interface, 'nodes'):
                 print(f"[DEBUG] NodeDB has {len(self.mesh_interface.nodes)} nodes")
                 for node_id, node_info in self.mesh_interface.nodes.items():
-                    print(f"[DEBUG] Found existing node: {node_id}")
+                    try:
+                        print(f"[DEBUG] Found existing node: {node_id}")
+                        # Create node objects for all nodes in database
+                        if node_id not in self.nodes:
+                            self.nodes[node_id] = MeshNode(node_id)
+                            # Update with info from nodeDB - wrap in try/except
+                            try:
+                                if hasattr(node_info, 'user') and node_info.user:
+                                    if hasattr(node_info.user, 'longName'):
+                                        self.nodes[node_id].long_name = node_info.user.longName
+                                    if hasattr(node_info.user, 'shortName'):
+                                        self.nodes[node_id].short_name = node_info.user.shortName
+                            except Exception as attr_error:
+                                print(f"[DEBUG] Could not read user info for {node_id}: {attr_error}")
+                    except Exception as e:
+                        print(f"[ERROR] Failed to load node {node_id}: {e}")
+                        continue
+                
+                print(f"[DEBUG] Loaded {len(self.nodes)} nodes from nodeDB")
             
             # Subscribe to packets
             def packet_handler(packet):
@@ -531,12 +591,18 @@ class MeshTrackerGUI:
             node = self.nodes[node_id]
             
             # Update RSSI/SNR
+            rssi_str = ""
             if 'rxRssi' in packet:
                 node.rssi = packet['rxRssi']
+                rssi_str = f" RSSI:{node.rssi}dBm"
                 print(f"[DEBUG] Node {node_id} RSSI: {node.rssi}")
             if 'rxSnr' in packet:
                 node.snr = packet['rxSnr']
                 print(f"[DEBUG] Node {node_id} SNR: {node.snr}")
+            
+            # Log packet
+            node_name = node.short_name if node.short_name != "Unknown" else node_id[-4:]
+            self.log_traffic(f"RX: {node_name}{rssi_str}")
             
             # Update node info
             node.update(packet, self.gps_data)
@@ -551,14 +617,20 @@ class MeshTrackerGUI:
                     'timestamp': time.time()
                 }
                 node.estimation_samples.append(sample)
-                print(f"[DEBUG] Sample collected for {node_id}, total: {len(node.estimation_samples)}")
+                sample_count = len(node.estimation_samples)
+                print(f"[DEBUG] Sample collected for {node_id}, total: {sample_count}")
+                self.log_calc(f"{node_name}: Sample {sample_count} collected at ({self.gps_data.latitude:.6f}, {self.gps_data.longitude:.6f}) RSSI:{node.rssi}dBm")
+                
                 if len(node.estimation_samples) > 200:
                     node.estimation_samples.pop(0)
                 
                 # Estimate position if we have enough samples
                 if len(node.estimation_samples) >= 10:
                     print(f"[DEBUG] Estimating position for {node_id}")
+                    self.log_calc(f"{node_name}: Starting position estimation with {sample_count} samples...")
                     self.estimate_node_position(node)
+                elif sample_count < 10:
+                    self.log_calc(f"{node_name}: Need {10 - sample_count} more samples for estimation")
             else:
                 print(f"[DEBUG] Not collecting sample: RSSI={node.rssi}, GPS fix={self.gps_data.fix}")
                     
@@ -571,6 +643,9 @@ class MeshTrackerGUI:
         """Estimate node position using trilateration"""
         try:
             samples = node.estimation_samples[-100:]  # Use recent samples
+            node_name = node.short_name if node.short_name != "Unknown" else node.node_id[-4:]
+            
+            self.log_calc(f"{node_name}: Processing {len(samples)} samples for trilateration...")
             
             # Simple centroid method for now
             lats = [s['gps_lat'] for s in samples]
@@ -579,8 +654,11 @@ class MeshTrackerGUI:
             est_lat = np.mean(lats)
             est_lon = np.mean(lons)
             
+            self.log_calc(f"{node_name}: Initial centroid estimate: {est_lat:.6f}, {est_lon:.6f}")
+            
             # Initialize or update Kalman filter
             if not node.kalman_initialized:
+                self.log_calc(f"{node_name}: Initializing Kalman filter...")
                 node.init_kalman_filter(est_lat, est_lon, initial_uncertainty=50.0)
             
             if node.kalman_filter:
@@ -593,17 +671,43 @@ class MeshTrackerGUI:
                 
                 node.estimated_position = (filtered_lat, filtered_lon)
                 
+                self.log_calc(f"{node_name}: Kalman filtered position: {filtered_lat:.6f}, {filtered_lon:.6f}")
+                
+                # Calculate distance and bearing if we have GPS
+                if self.gps_data.fix:
+                    dist = calculate_distance(
+                        self.gps_data.latitude, self.gps_data.longitude,
+                        filtered_lat, filtered_lon
+                    )
+                    bearing = calculate_bearing(
+                        self.gps_data.latitude, self.gps_data.longitude,
+                        filtered_lat, filtered_lon
+                    )
+                    compass = bearing_to_compass(bearing)
+                    self.log_calc(f"{node_name}: LOCATED! Distance: {format_distance(dist)}, Bearing: {bearing:.0f}° ({compass})")
+                
                 # Update map marker
                 if node.node_id == self.selected_node:
                     self.update_target_position()
                     
         except Exception as e:
             print(f"Position estimation error: {e}")
+            self.log_calc(f"ERROR: Position estimation failed - {e}")
             
     def update_tracker_position(self):
         """Update tracker (your) position on map"""
         if self.gps_data.fix:
             lat, lon = self.gps_data.latitude, self.gps_data.longitude
+            
+            # Only update marker if position changed significantly (>10 meters) or marker doesn't exist
+            if self.last_marker_position:
+                dist = calculate_distance(
+                    self.last_marker_position[0], self.last_marker_position[1],
+                    lat, lon
+                )
+                if dist < 10 and self.tracker_marker:  # Less than 10 meters, skip update
+                    return
+            
             print(f"[DEBUG] Updating tracker position: {lat}, {lon}")
             
             # Remove old marker
@@ -617,6 +721,7 @@ class MeshTrackerGUI:
                 marker_color_circle="blue",
                 marker_color_outside="darkblue"
             )
+            self.last_marker_position = (lat, lon)
             print(f"[DEBUG] Tracker marker placed at {lat}, {lon}")
             
             # Center map on first fix
@@ -659,14 +764,26 @@ class MeshTrackerGUI:
             return
             
         index = selection[0]
-        node_ids = list(self.nodes.keys())
+        node_ids = sorted(self.nodes.keys(), 
+                         key=lambda x: self.nodes[x].last_seen, 
+                         reverse=True)
         if index < len(node_ids):
             self.selected_node = node_ids[index]
+            print(f"[DEBUG] Node selected: {self.selected_node}")
             self.update_target_position()
+            # Update info panel immediately
+            if self.selected_node in self.nodes:
+                node = self.nodes[self.selected_node]
+                info = self.get_node_info(node)
+                self.info_text.delete('1.0', tk.END)
+                self.info_text.insert('1.0', info)
             
     def update_display(self):
         """Update the display periodically"""
         try:
+            # Update tracker position on map (will only update if moved >10m)
+            self.update_tracker_position()
+            
             # Update node list
             self.node_listbox.delete(0, tk.END)
             node_count = len(self.nodes)
@@ -688,6 +805,11 @@ class MeshTrackerGUI:
                 info = self.get_node_info(node)
                 self.info_text.delete('1.0', tk.END)
                 self.info_text.insert('1.0', info)
+            else:
+                # Show GPS info when no node selected
+                info = self.get_gps_info()
+                self.info_text.delete('1.0', tk.END)
+                self.info_text.insert('1.0', info)
             
             # Update status
             gps_status = "GPS: Fix" if self.gps_data.fix else "GPS: No Fix"
@@ -701,29 +823,24 @@ class MeshTrackerGUI:
             import traceback
             traceback.print_exc()
         
-        # Schedule next update
-        self.root.after(1000, self.update_display)
+        # Schedule next update (every 10 seconds)
+        if self.running:
+            self.root.after(10000, self.update_display)
         
     def get_node_info(self, node: MeshNode) -> str:
         """Get formatted node information"""
         info = []
-        info.append(f"Node: {node.long_name}")
-        info.append(f"ID: {node.node_id}")
-        info.append(f"Short Name: {node.short_name}")
-        info.append("")
-        
-        info.append("Signal:")
-        info.append(f"  RSSI: {node.rssi}dBm" if node.rssi else "  RSSI: N/A")
-        info.append(f"  SNR: {node.snr:.1f}dB" if node.snr else "  SNR: N/A")
-        info.append(f"  Last Seen: {int(time.time() - node.last_seen)}s ago")
-        info.append(f"  Packets: {node.packet_count}")
+        info.append("=" * 45)
+        info.append(f"TARGET: {node.long_name}")
+        info.append("=" * 45)
         info.append("")
         
         if node.estimated_position:
             lat, lon = node.estimated_position
-            info.append("Estimated Position:")
-            info.append(f"  Lat: {lat:.6f}")
-            info.append(f"  Lon: {lon:.6f}")
+            info.append("*** ESTIMATED POSITION ***")
+            info.append(f"Latitude:  {lat:.6f}°")
+            info.append(f"Longitude: {lon:.6f}°")
+            info.append("")
             
             if self.gps_data.fix:
                 dist = calculate_distance(
@@ -736,11 +853,24 @@ class MeshTrackerGUI:
                 )
                 compass = bearing_to_compass(bearing)
                 
-                info.append(f"  Distance: {format_distance(dist)}")
-                info.append(f"  Bearing: {bearing:.0f}° ({compass})")
+                info.append("*** NAVIGATION ***")
+                info.append(f"Distance:  {format_distance(dist)}")
+                info.append(f"Bearing:   {bearing:.0f}° ({compass})")
+                info.append("")
         else:
-            info.append("Position: Not yet estimated")
-            info.append(f"Samples: {len(node.estimation_samples)}/10")
+            info.append("*** POSITION NOT ESTIMATED ***")
+            info.append(f"Collecting samples: {len(node.estimation_samples)}/10 required")
+            info.append("Move around to collect more signal samples")
+            info.append("")
+        
+        info.append("Signal Quality:")
+        info.append(f"  RSSI: {node.rssi}dBm" if node.rssi else "  RSSI: N/A")
+        info.append(f"  SNR: {node.snr:.1f}dB" if node.snr else "  SNR: N/A")
+        info.append(f"  Last: {int(time.time() - node.last_seen)}s ago")
+        info.append("")
+        info.append(f"ID: {node.node_id}")
+        info.append(f"Samples: {len(node.estimation_samples)}")
+        info.append(f"Packets: {node.packet_count}")
         
         info.append("")
         info.append("Metrics:")
@@ -752,11 +882,110 @@ class MeshTrackerGUI:
         
         return '\n'.join(info)
         
+    def get_gps_info(self) -> str:
+        """Get formatted GPS information"""
+        info = []
+        info.append("GPS Tracker Status")
+        info.append("=" * 40)
+        info.append("")
+        
+        if self.gps_data.fix:
+            info.append("GPS Status: LOCKED")
+            info.append(f"Satellites: {self.gps_data.satellites or 'N/A'}")
+            info.append("")
+            info.append("Current Position:")
+            info.append(f"  Latitude:  {self.gps_data.latitude:.6f}°")
+            info.append(f"  Longitude: {self.gps_data.longitude:.6f}°")
+            if self.gps_data.altitude:
+                info.append(f"  Altitude:  {self.gps_data.altitude:.1f} ft")
+            if self.gps_data.speed:
+                info.append(f"  Speed:     {self.gps_data.speed:.1f} mph")
+        else:
+            info.append("GPS Status: SEARCHING...")
+            info.append("")
+            info.append("Waiting for GPS fix...")
+            info.append("Make sure GPS device is connected")
+            info.append("and has clear view of sky.")
+        
+        info.append("")
+        info.append(f"Mesh Nodes: {len(self.nodes)}")
+        if self.mesh_interface:
+            info.append("Meshtastic: Connected")
+        else:
+            info.append("Meshtastic: Not connected")
+        
+        info.append("")
+        info.append("=" * 40)
+        info.append("Select a node from the list to track")
+        
+        return '\n'.join(info)
+        
+    def log_calc(self, message: str):
+        """Log position calculation progress to the calc text area"""
+        try:
+            # Check if widget exists and is valid
+            if not hasattr(self, 'calc_text') or not self.calc_text.winfo_exists():
+                return
+                
+            timestamp = time.strftime("%H:%M:%S")
+            log_entry = f"[{timestamp}] {message}\n"
+            
+            # Enable writing, insert at beginning, then disable
+            self.calc_text.config(state='normal')
+            self.calc_text.insert('1.0', log_entry)
+            
+            # Keep only last 50 lines
+            lines = self.calc_text.get('1.0', tk.END).split('\n')
+            if len(lines) > 50:
+                self.calc_text.delete(f'{50}.0', tk.END)
+            
+            self.calc_text.config(state='disabled')
+            self.calc_text.see('1.0')  # Scroll to top
+        except Exception as e:
+            print(f"[ERROR] Log calc error: {e}")
+        
+    def log_traffic(self, message: str):
+        """Log mesh traffic to the traffic text area"""
+        try:
+            # Check if widget exists and is valid
+            if not hasattr(self, 'traffic_text') or not self.traffic_text.winfo_exists():
+                return
+                
+            timestamp = time.strftime("%H:%M:%S")
+            log_entry = f"[{timestamp}] {message}\n"
+            
+            # Enable writing, insert at beginning, then disable
+            self.traffic_text.config(state='normal')
+            self.traffic_text.insert('1.0', log_entry)
+            
+            # Keep only last 50 lines
+            lines = self.traffic_text.get('1.0', tk.END).split('\n')
+            if len(lines) > 50:
+                self.traffic_text.delete(f'{50}.0', tk.END)
+            
+            self.traffic_text.config(state='disabled')
+            self.traffic_text.see('1.0')  # Scroll to top
+        except Exception as e:
+            print(f"[ERROR] Log traffic error: {e}")
+        
+    def quit_app(self):
+        """Gracefully quit the application"""
+        print("[DEBUG] Quit requested")
+        self.cleanup()
+        self.root.quit()
+        self.root.destroy()
+        
     def cleanup(self):
         """Cleanup on exit"""
+        print("[DEBUG] Cleanup called")
         self.running = False
         if self.mesh_interface:
-            self.mesh_interface.close()
+            try:
+                self.mesh_interface.close()
+                print("[DEBUG] Meshtastic interface closed")
+            except:
+                pass
+        print("[DEBUG] Cleanup complete")
 
 
 def main():
@@ -792,9 +1021,8 @@ def main():
     )
     
     def on_closing():
-        print("[DEBUG] Closing application")
-        app.cleanup()
-        root.destroy()
+        print("[DEBUG] Window close requested")
+        app.quit_app()
     
     root.protocol("WM_DELETE_WINDOW", on_closing)
     print("[DEBUG] Starting GUI main loop")
