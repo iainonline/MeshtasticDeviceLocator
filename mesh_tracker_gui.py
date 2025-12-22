@@ -327,57 +327,85 @@ class MeshTrackerGUI:
         
     def gps_receiver_thread(self):
         """Receive GPS data via UDP"""
-        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        sock.bind(('', self.gps_port))
-        sock.settimeout(1.0)
+        print(f"[DEBUG] Starting GPS receiver on port {self.gps_port}")
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            sock.bind(('', self.gps_port))
+            sock.settimeout(1.0)
+            print(f"[DEBUG] GPS receiver bound to port {self.gps_port}")
+        except Exception as e:
+            print(f"[ERROR] Failed to bind GPS port {self.gps_port}: {e}")
+            return
         
         while self.running:
             try:
                 data, _ = sock.recvfrom(1024)
                 nmea_data = json.loads(data.decode())
+                print(f"[DEBUG] GPS data received: {nmea_data}")
                 self.gps_data.update_from_nmea(nmea_data)
                 
                 # Update map position if we have a fix
                 if self.gps_data.fix:
+                    print(f"[DEBUG] GPS fix: {self.gps_data.latitude}, {self.gps_data.longitude}")
                     self.update_tracker_position()
+                else:
+                    print(f"[DEBUG] No GPS fix yet")
                     
             except socket.timeout:
                 continue
             except Exception as e:
-                print(f"GPS error: {e}")
+                print(f"[ERROR] GPS error: {e}")
                 time.sleep(1)
                 
     def mesh_receiver_thread(self):
         """Receive Meshtastic packets"""
+        print("[DEBUG] Starting Meshtastic receiver")
         try:
             if meshtastic is None:
+                print("[ERROR] Meshtastic library not available")
                 return
                 
+            print(f"[DEBUG] Connecting to Meshtastic port: {self.meshtastic_port or 'auto-detect'}")
             if self.meshtastic_port:
                 self.mesh_interface = meshtastic.serial_interface.SerialInterface(self.meshtastic_port)
             else:
                 self.mesh_interface = meshtastic.serial_interface.SerialInterface()
             
+            print("[DEBUG] Meshtastic connected, waiting for nodeDB...")
             time.sleep(3)  # Wait for nodeDB to populate
+            
+            # Load existing nodes
+            if self.mesh_interface and hasattr(self.mesh_interface, 'nodes'):
+                print(f"[DEBUG] NodeDB has {len(self.mesh_interface.nodes)} nodes")
+                for node_id, node_info in self.mesh_interface.nodes.items():
+                    print(f"[DEBUG] Found existing node: {node_id}")
             
             # Subscribe to packets
             def packet_handler(packet):
+                print(f"[DEBUG] Packet received: {packet.get('fromId', 'unknown')}")
                 self.handle_mesh_packet(packet)
             
             if self.mesh_interface:
                 self.mesh_interface.on_receive = packet_handler
+                print("[DEBUG] Meshtastic packet handler registered")
                 
         except Exception as e:
-            print(f"Meshtastic error: {e}")
+            print(f"[ERROR] Meshtastic error: {e}")
+            import traceback
+            traceback.print_exc()
             
     def handle_mesh_packet(self, packet: dict):
         """Handle incoming Meshtastic packet"""
         try:
             node_id = packet.get('fromId', packet.get('from'))
             if not node_id:
+                print(f"[DEBUG] Packet has no fromId: {packet.keys()}")
                 return
             
+            print(f"[DEBUG] Processing packet from {node_id}")
+            
             if node_id not in self.nodes:
+                print(f"[DEBUG] Creating new node: {node_id}")
                 self.nodes[node_id] = MeshNode(node_id)
             
             node = self.nodes[node_id]
@@ -385,8 +413,10 @@ class MeshTrackerGUI:
             # Update RSSI/SNR
             if 'rxRssi' in packet:
                 node.rssi = packet['rxRssi']
+                print(f"[DEBUG] Node {node_id} RSSI: {node.rssi}")
             if 'rxSnr' in packet:
                 node.snr = packet['rxSnr']
+                print(f"[DEBUG] Node {node_id} SNR: {node.snr}")
             
             # Update node info
             node.update(packet, self.gps_data)
@@ -401,15 +431,21 @@ class MeshTrackerGUI:
                     'timestamp': time.time()
                 }
                 node.estimation_samples.append(sample)
+                print(f"[DEBUG] Sample collected for {node_id}, total: {len(node.estimation_samples)}")
                 if len(node.estimation_samples) > 200:
                     node.estimation_samples.pop(0)
                 
                 # Estimate position if we have enough samples
                 if len(node.estimation_samples) >= 10:
+                    print(f"[DEBUG] Estimating position for {node_id}")
                     self.estimate_node_position(node)
+            else:
+                print(f"[DEBUG] Not collecting sample: RSSI={node.rssi}, GPS fix={self.gps_data.fix}")
                     
         except Exception as e:
-            print(f"Packet handling error: {e}")
+            print(f"[ERROR] Packet handling error: {e}")
+            import traceback
+            traceback.print_exc()
             
     def estimate_node_position(self, node: MeshNode):
         """Estimate node position using trilateration"""
@@ -448,6 +484,7 @@ class MeshTrackerGUI:
         """Update tracker (your) position on map"""
         if self.gps_data.fix:
             lat, lon = self.gps_data.latitude, self.gps_data.longitude
+            print(f"[DEBUG] Updating tracker position: {lat}, {lon}")
             
             # Remove old marker
             if self.tracker_marker:
@@ -460,22 +497,27 @@ class MeshTrackerGUI:
                 marker_color_circle="blue",
                 marker_color_outside="darkblue"
             )
+            print(f"[DEBUG] Tracker marker placed at {lat}, {lon}")
             
             # Center map on first fix
             if not hasattr(self, '_map_centered'):
                 self.map_widget.set_position(lat, lon)
                 self._map_centered = True
+                print(f"[DEBUG] Map centered on GPS position")
                 
     def update_target_position(self):
         """Update target node position on map"""
         if not self.selected_node:
+            print(f"[DEBUG] No node selected")
             return
             
         node = self.nodes.get(self.selected_node)
         if not node or not node.estimated_position:
+            print(f"[DEBUG] Node {self.selected_node} has no estimated position")
             return
             
         lat, lon = node.estimated_position
+        print(f"[DEBUG] Updating target position: {lat}, {lon}")
         
         # Remove old marker
         if self.target_marker:
@@ -488,6 +530,7 @@ class MeshTrackerGUI:
             marker_color_circle="red",
             marker_color_outside="darkred"
         )
+        print(f"[DEBUG] Target marker placed at {lat}, {lon}")
         
     def on_node_select(self, event):
         """Handle node selection from list"""
@@ -506,6 +549,9 @@ class MeshTrackerGUI:
         try:
             # Update node list
             self.node_listbox.delete(0, tk.END)
+            node_count = len(self.nodes)
+            print(f"[DEBUG] Updating display, {node_count} nodes")
+            
             for node_id, node in sorted(self.nodes.items(), 
                                         key=lambda x: x[1].last_seen, 
                                         reverse=True):
@@ -531,7 +577,9 @@ class MeshTrackerGUI:
             )
             
         except Exception as e:
-            print(f"Display update error: {e}")
+            print(f"[ERROR] Display update error: {e}")
+            import traceback
+            traceback.print_exc()
         
         # Schedule next update
         self.root.after(1000, self.update_display)
@@ -593,6 +641,7 @@ class MeshTrackerGUI:
 
 def main():
     """Main entry point"""
+    print("[DEBUG] Starting Meshtastic Node Tracker GUI")
     parser = argparse.ArgumentParser(
         description='Meshtastic Node Tracker - GUI Version'
     )
@@ -608,8 +657,11 @@ def main():
                         help='Frequency in MHz (default: 915.0)')
     
     args = parser.parse_args()
+    print(f"[DEBUG] GPS port: {args.gps_port}")
+    print(f"[DEBUG] Meshtastic port: {args.meshtastic_port or 'auto-detect'}")
     
     root = tk.Tk()
+    print("[DEBUG] Creating GUI application")
     app = MeshTrackerGUI(
         root,
         gps_port=args.gps_port,
@@ -620,11 +672,14 @@ def main():
     )
     
     def on_closing():
+        print("[DEBUG] Closing application")
         app.cleanup()
         root.destroy()
     
     root.protocol("WM_DELETE_WINDOW", on_closing)
+    print("[DEBUG] Starting GUI main loop")
     root.mainloop()
+    print("[DEBUG] GUI closed")
 
 
 if __name__ == '__main__':
