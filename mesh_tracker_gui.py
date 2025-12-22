@@ -303,6 +303,7 @@ class MeshTrackerGUI:
         self.tracker_marker = None
         self.target_marker = None
         self.last_marker_position = None  # Track last marker position to reduce flicker
+        self.last_gps_position = None  # Track last valid GPS position for when fix is lost
         
         self.setup_gui()
         self.start_background_threads()
@@ -722,6 +723,7 @@ class MeshTrackerGUI:
                 marker_color_outside="darkblue"
             )
             self.last_marker_position = (lat, lon)
+            self.last_gps_position = (lat, lon)  # Save last valid GPS position
             print(f"[DEBUG] Tracker marker placed at {lat}, {lon}")
             
             # Center map on first fix
@@ -741,8 +743,8 @@ class MeshTrackerGUI:
             print(f"[DEBUG] Node {self.selected_node} has no estimated position")
             return
             
-        lat, lon = node.estimated_position
-        print(f"[DEBUG] Updating target position: {lat}, {lon}")
+        target_lat, target_lon = node.estimated_position
+        print(f"[DEBUG] Updating target position: {target_lat}, {target_lon}")
         
         # Remove old marker
         if self.target_marker:
@@ -750,12 +752,46 @@ class MeshTrackerGUI:
         
         # Add new marker
         self.target_marker = self.map_widget.set_marker(
-            lat, lon,
+            target_lat, target_lon,
             text=f"🎯 {node.short_name}",
             marker_color_circle="red",
             marker_color_outside="darkred"
         )
-        print(f"[DEBUG] Target marker placed at {lat}, {lon}")
+        print(f"[DEBUG] Target marker placed at {target_lat}, {target_lon}")
+        
+        # Scale map to fit both markers
+        # Use current GPS position if available, otherwise use last recorded position
+        tracker_lat, tracker_lon = None, None
+        if self.gps_data.fix:
+            tracker_lat = self.gps_data.latitude
+            tracker_lon = self.gps_data.longitude
+        elif self.last_gps_position:
+            tracker_lat, tracker_lon = self.last_gps_position
+            print(f"[DEBUG] Using last recorded GPS position: {tracker_lat}, {tracker_lon}")
+        
+        if tracker_lat and tracker_lon:
+            # Calculate bounding box
+            min_lat = min(tracker_lat, target_lat)
+            max_lat = max(tracker_lat, target_lat)
+            min_lon = min(tracker_lon, target_lon)
+            max_lon = max(tracker_lon, target_lon)
+            
+            # Add 20% padding to the bounding box
+            lat_padding = (max_lat - min_lat) * 0.2
+            lon_padding = (max_lon - min_lon) * 0.2
+            
+            # Ensure minimum padding (about 100 meters)
+            if lat_padding < 0.001:  # ~111 meters
+                lat_padding = 0.001
+            if lon_padding < 0.001:
+                lon_padding = 0.001
+            
+            # Set map to fit both markers
+            self.map_widget.fit_bounding_box(
+                (max_lat + lat_padding, min_lon - lon_padding),  # top-left
+                (min_lat - lat_padding, max_lon + lon_padding)   # bottom-right
+            )
+            print(f"[DEBUG] Map scaled to fit tracker and target")
         
     def on_node_select(self, event):
         """Handle node selection from list"""
