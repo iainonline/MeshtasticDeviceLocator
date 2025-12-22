@@ -591,6 +591,20 @@ class MeshTrackerGUI:
             
             node = self.nodes[node_id]
             
+            # Update node name from mesh_interface if available
+            if self.mesh_interface and hasattr(self.mesh_interface, 'nodes'):
+                if node_id in self.mesh_interface.nodes:
+                    try:
+                        node_info = self.mesh_interface.nodes[node_id]
+                        if hasattr(node_info, 'user') and node_info.user:
+                            if hasattr(node_info.user, 'longName') and node.long_name == "Unknown":
+                                node.long_name = node_info.user.longName
+                            if hasattr(node_info.user, 'shortName') and node.short_name == "Unknown":
+                                node.short_name = node_info.user.shortName
+                                print(f"[DEBUG] Updated node {node_id} name: {node.short_name}")
+                    except Exception as e:
+                        pass
+            
             # Update RSSI/SNR
             rssi_str = ""
             if 'rxRssi' in packet:
@@ -626,12 +640,12 @@ class MeshTrackerGUI:
                     node.estimation_samples.pop(0)
                 
                 # Estimate position if we have enough samples
-                if len(node.estimation_samples) >= 10:
+                if len(node.estimation_samples) >= 3:
                     print(f"[DEBUG] Estimating position for {node_id}")
                     self.log_calc(f"{node_name}: Starting position estimation with {sample_count} samples...")
                     self.estimate_node_position(node)
-                elif sample_count < 10:
-                    self.log_calc(f"{node_name}: Need {10 - sample_count} more samples for estimation")
+                elif sample_count < 3:
+                    self.log_calc(f"{node_name}: Need {3 - sample_count} more samples for estimation")
             else:
                 print(f"[DEBUG] Not collecting sample: RSSI={node.rssi}, GPS fix={self.gps_data.fix}")
                     
@@ -895,7 +909,7 @@ class MeshTrackerGUI:
                 info.append("")
         else:
             info.append("*** POSITION NOT ESTIMATED ***")
-            info.append(f"Collecting samples: {len(node.estimation_samples)}/10 required")
+            info.append(f"Collecting samples: {len(node.estimation_samples)}/3 required")
             info.append("Move around to collect more signal samples")
             info.append("")
         
