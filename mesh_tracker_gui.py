@@ -5,7 +5,7 @@ Windows-style GUI with embedded map for tracking mesh nodes
 """
 
 import tkinter as tk
-from tkinter import ttk, scrolledtext
+from tkinter import ttk, scrolledtext, messagebox
 import tkintermapview
 import threading
 import socket
@@ -14,6 +14,7 @@ import time
 import math
 import argparse
 import re
+import subprocess
 from datetime import datetime
 from collections import defaultdict
 from typing import Dict, List, Optional, Tuple
@@ -27,6 +28,35 @@ try:
 except ImportError:
     print("Warning: meshtastic library not found")
     meshtastic = None
+
+
+def check_device_timeout_errors(port: str) -> bool:
+    """Check if device is reporting timeout errors in kernel log"""
+    try:
+        # Check dmesg for recent timeout errors on this port
+        result = subprocess.run(
+            ['dmesg', '|', 'tail', '-50'],
+            shell=True,
+            capture_output=True,
+            text=True,
+            timeout=2
+        )
+        output = result.stdout.lower()
+        
+        # Extract port name (e.g., ttyUSB0 from /dev/ttyUSB0)
+        port_name = port.split('/')[-1] if '/' in port else port
+        
+        # Look for timeout errors (error -110 is ETIMEDOUT)
+        if port_name.lower() in output and (
+            'status: -110' in output or 
+            'etimedout' in output or
+            'timed out' in output or
+            'failed set request' in output
+        ):
+            return True
+    except Exception as e:
+        print(f"[DEBUG] Could not check device status: {e}")
+    return False
 
 
 def parse_nmea_coordinate(coord_str: str, direction: str) -> Optional[float]:
@@ -119,6 +149,8 @@ class MeshNode:
         self.long_name: str = "Unknown"
         self.last_seen: float = time.time()
         self.rssi: Optional[int] = None
+        self.rssi_min: Optional[int] = None
+        self.rssi_max: Optional[int] = None
         self.snr: Optional[float] = None
         self.latitude: Optional[float] = None
         self.longitude: Optional[float] = None
@@ -127,6 +159,7 @@ class MeshNode:
         self.packet_count: int = 0
         self.estimation_samples: List[dict] = []
         self.estimated_position: Optional[Tuple[float, float]] = None
+        self.estimated_distance: Optional[float] = None
         self.previous_position: Optional[Tuple[float, float]] = None
         self.estimation_log: List[str] = []
         self.metrics: dict = {
@@ -159,6 +192,19 @@ class MeshNode:
                 self.short_name = user.shortName
             if hasattr(user, 'longName'):
                 self.long_name = user.longName
+        
+        # Extract position from packet if present
+        if 'decoded' in packet:
+            decoded = packet['decoded']
+            if 'position' in decoded:
+                pos = decoded['position']
+                # Check for position data
+                if 'latitude' in pos and 'longitude' in pos:
+                    self.latitude = pos['latitude']
+                    self.longitude = pos['longitude']
+                    print(f"[DEBUG] Node {self.node_id} position from packet: {self.latitude:.6f}, {self.longitude:.6f}")
+                if 'altitude' in pos:
+                    self.altitude = pos['altitude']
         
         if self.rssi is not None:
             history_entry = {
@@ -213,6 +259,28 @@ class MeshNode:
         
         self.last_update_time = time.time()
         self.kalman_initialized = True
+
+
+def estimate_distance_from_rssi(rssi: int, tx_power: int = 20, path_loss_exponent: float = 2.5) -> float:
+    """
+    Estimate distance from RSSI using path loss formula
+    
+    Args:
+        rssi: Received signal strength in dBm
+        tx_power: Transmit power in dBm (typically 20-30 for Meshtastic)
+        path_loss_exponent: Path loss exponent (2=free space, 2-3=outdoor, 3-4=indoor)
+    
+    Returns:
+        Estimated distance in meters
+    """
+    if rssi >= tx_power:
+        return 1.0  # Very close
+    
+    # Path loss formula: RSSI = TxPower - 10 * n * log10(distance)
+    # Solving for distance: distance = 10^((TxPower - RSSI) / (10 * n))
+    distance = 10 ** ((tx_power - rssi) / (10 * path_loss_exponent))
+    
+    return distance
 
 
 def calculate_distance(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
@@ -298,7 +366,7 @@ class MeshTrackerGUI:
         self.selected_node: Optional[str] = None
         self.mesh_interface = None
         self.mesh_connected = False
-        self.local_node_name = "Not Connected"
+        self.local_node_name = "Connecting..."
         self.running = True
         
         # Map markers
@@ -403,8 +471,9 @@ class MeshTrackerGUI:
                                       font=('Arial', 9))
         self.status_label.pack(side=tk.LEFT, padx=5)
         
-        # Update timer
-        self.update_display()
+        # Update timer - delay initial update to allow connection threads to start
+        # First update will happen after 2 seconds
+        self.root.after(2000, self.update_display)
         
     def start_background_threads(self):
         """Start GPS and Meshtastic receiver threads"""
@@ -528,6 +597,16 @@ class MeshTrackerGUI:
                 
             print(f"[DEBUG] Connecting to Meshtastic port: {self.meshtastic_port or 'auto-detect'}")
             
+            # Subscribe to packets using pubsub BEFORE creating interface
+            # This must be done before the interface is created to catch all packets
+            from pubsub import pub
+            
+            # Only subscribe once - check if already subscribed
+            if not hasattr(self, '_pubsub_subscribed'):
+                pub.subscribe(self._packet_handler_callback, "meshtastic.receive")
+                self._pubsub_subscribed = True
+                print("[DEBUG] Meshtastic packet handler registered via pubsub")
+            
             # Close existing connection if any
             if self.mesh_interface:
                 try:
@@ -546,8 +625,43 @@ class MeshTrackerGUI:
                 else:
                     self.mesh_interface = meshtastic.serial_interface.SerialInterface()
             except Exception as conn_error:
-                print(f"[WARNING] Could not connect to Meshtastic: {conn_error}")
-                self.log_traffic(f"USB connection failed: {conn_error}")
+                error_str = str(conn_error)
+                print(f"[WARNING] Could not connect to Meshtastic: {error_str}")
+                self.log_traffic(f"✗ USB connection failed: {error_str}")
+                
+                # Check for common errors
+                if "Permission denied" in error_str:
+                    self.log_traffic("Hint: Add user to 'dialout' group: sudo usermod -a -G dialout $USER")
+                elif "No such file" in error_str or "cannot find" in error_str.lower():
+                    self.log_traffic("Hint: Device unplugged or wrong port specified")
+                elif "busy" in error_str.lower() or "in use" in error_str.lower() or "exclusively lock" in error_str.lower():
+                    self.log_traffic("Hint: Close other apps using the device (meshtastic CLI, etc.)")
+                    
+                    # Check if device is hung/frozen (timeout errors)
+                    device_port = self.meshtastic_port if self.meshtastic_port else "/dev/ttyUSB0"
+                    if check_device_timeout_errors(device_port):
+                        error_msg = (
+                            "⚠️ DEVICE TIMEOUT DETECTED ⚠️\n\n"
+                            "Your Meshtastic device appears to be frozen/hung.\n"
+                            "The USB-to-serial chip is not responding (ETIMEDOUT error).\n\n"
+                            "TO FIX THIS:\n"
+                            "1. Unplug the Meshtastic USB cable\n"
+                            "2. Wait 5 seconds\n"
+                            "3. Plug it back in\n"
+                            "4. Close this window and restart the application\n\n"
+                            "The device needs a hardware reset to recover."
+                        )
+                        self.log_traffic("⚠️ Device appears frozen - unplug and replug USB cable!")
+                        print(f"[ERROR] {error_msg}")
+                        
+                        # Show popup dialog
+                        self.root.after(100, lambda: messagebox.showwarning(
+                            "Meshtastic Device Frozen",
+                            error_msg
+                        ))
+                    else:
+                        self.log_traffic("Hint: If problem persists, try unplugging and replugging the USB cable")
+                
                 return False
             
             print("[DEBUG] Meshtastic connected, waiting for nodeDB...")
@@ -557,18 +671,35 @@ class MeshTrackerGUI:
             self.mesh_connected = True
             try:
                 if hasattr(self.mesh_interface, 'myInfo') and self.mesh_interface.myInfo:
-                    my_node_id = self.mesh_interface.myInfo.my_node_num
+                    my_node_num = self.mesh_interface.myInfo.my_node_num
+                    # Convert node number to hex ID format (e.g., !9e7656a8)
+                    my_node_id = f'!{my_node_num:08x}'
+                    print(f"[DEBUG] Local node: {my_node_id}")
+                    
+                    # Default to node ID, will be overridden if name found
+                    self.local_node_name = my_node_id
+                    
                     if my_node_id and my_node_id in self.mesh_interface.nodes:
                         my_node = self.mesh_interface.nodes[my_node_id]
+                        print(f"[DEBUG] Found local node in nodeDB")
                         if hasattr(my_node, 'user') and my_node.user:
+                            print(f"[DEBUG] Local node has user info")
                             if hasattr(my_node.user, 'longName') and my_node.user.longName:
                                 self.local_node_name = my_node.user.longName
-                                print(f"[DEBUG] Local node name: {self.local_node_name}")
+                                print(f"[DEBUG] Local node longName: {self.local_node_name}")
                             elif hasattr(my_node.user, 'shortName') and my_node.user.shortName:
                                 self.local_node_name = my_node.user.shortName
-                                print(f"[DEBUG] Local node name: {self.local_node_name}")
+                                print(f"[DEBUG] Local node shortName: {self.local_node_name}")
+                            else:
+                                print(f"[DEBUG] Local node user has no name, using ID: {my_node_id}")
+                        else:
+                            print(f"[DEBUG] Local node has no user info, using ID: {my_node_id}")
+                    else:
+                        print(f"[DEBUG] Local node {my_node_id} not found in nodeDB, using ID")
             except Exception as e:
                 print(f"[DEBUG] Could not get local node name: {e}")
+                import traceback
+                traceback.print_exc()
             
             # Load existing nodes
             if self.mesh_interface and hasattr(self.mesh_interface, 'nodes'):
@@ -579,6 +710,14 @@ class MeshTrackerGUI:
                         # Create node objects for all nodes in database
                         if node_id not in self.nodes:
                             self.nodes[node_id] = MeshNode(node_id)
+                            
+                            # Set last_seen from nodeDB lastHeard time if available
+                            if hasattr(node_info, 'lastHeard') and node_info.lastHeard:
+                                try:
+                                    self.nodes[node_id].last_seen = node_info.lastHeard.ToSeconds()
+                                except:
+                                    pass  # Keep default current time if conversion fails
+                            
                             # Update with info from nodeDB - wrap in try/except
                             try:
                                 if hasattr(node_info, 'user') and node_info.user:
@@ -595,16 +734,21 @@ class MeshTrackerGUI:
                         continue
                 
                 print(f"[DEBUG] Loaded {len(self.nodes)} nodes from nodeDB")
-            
-            # Subscribe to packets
-            def packet_handler(packet):
-                print(f"[DEBUG] Packet received: {packet.get('fromId', 'unknown')}")
-                self.handle_mesh_packet(packet)
+                
+                # Log summary of recent activity
+                current_time = time.time()
+                recent_count = sum(1 for n in self.nodes.values() if (current_time - n.last_seen) < 600)
+                if recent_count > 0:
+                    self.log_traffic(f"ℹ {recent_count} nodes heard in last 10 min")
+                else:
+                    self.log_traffic(f"ℹ No recent mesh activity detected")
             
             if self.mesh_interface:
-                self.mesh_interface.on_receive = packet_handler
-                print("[DEBUG] Meshtastic packet handler registered")
-                self.log_traffic(f"USB connected: {self.local_node_name}")
+                self.log_traffic(f"✓ USB connected: {self.local_node_name} ({len(self.nodes)} nodes loaded)")
+                self.log_traffic(f"⟳ Listening for mesh packets...")
+                # Update display immediately to show connected status
+                if hasattr(self, 'root'):
+                    self.root.after(100, self.update_display)
                 return True
             
             return False
@@ -642,9 +786,14 @@ class MeshTrackerGUI:
         print("[DEBUG] Reconnect USB requested")
         self.log_traffic("Reconnecting USB...")
         
+        # Update status bar immediately
+        self.status_label.config(text="Reconnecting to USB...")
+        
         # Check if USB device is available
         if not self.check_usb_device():
-            self.log_traffic("No USB device found - check connection")
+            error_msg = "No USB device found - check connection"
+            self.log_traffic(error_msg)
+            self.status_label.config(text=f"ERROR: {error_msg}")
             print("[WARNING] No USB device found")
             return
         
@@ -653,8 +802,14 @@ class MeshTrackerGUI:
             success = self.connect_meshtastic()
             if success:
                 print("[DEBUG] Reconnection successful")
+                self.log_traffic(f"✓ USB connected: {self.local_node_name}")
+                # Force immediate status update
+                self.root.after(100, self.update_display)
             else:
                 print("[DEBUG] Reconnection failed")
+                error_msg = "USB reconnection failed - check device"
+                self.log_traffic(error_msg)
+                self.status_label.config(text=f"ERROR: {error_msg}")
         
         threading.Thread(target=reconnect_thread, daemon=True).start()
     
@@ -666,6 +821,16 @@ class MeshTrackerGUI:
         except Exception as e:
             print(f"[ERROR] Meshtastic thread error: {e}")
             print("[INFO] Continuing without Meshtastic connection")
+            import traceback
+            traceback.print_exc()
+    
+    def _packet_handler_callback(self, packet, interface):
+        """Callback for pubsub mesh packet reception"""
+        try:
+            print(f"[DEBUG] Packet received: {packet.get('fromId', 'unknown')}")
+            self.handle_mesh_packet(packet)
+        except Exception as e:
+            print(f"[ERROR] Packet handler exception: {e}")
             import traceback
             traceback.print_exc()
             
@@ -699,12 +864,30 @@ class MeshTrackerGUI:
                     except Exception as e:
                         pass
             
-            # Update RSSI/SNR
+            # Update RSSI/SNR and track min/max
             rssi_str = ""
             if 'rxRssi' in packet:
                 node.rssi = packet['rxRssi']
-                rssi_str = f" RSSI:{node.rssi}dBm"
-                print(f"[DEBUG] Node {node_id} RSSI: {node.rssi}")
+                
+                # Track min/max RSSI
+                if node.rssi_min is None or node.rssi < node.rssi_min:
+                    node.rssi_min = node.rssi
+                if node.rssi_max is None or node.rssi > node.rssi_max:
+                    node.rssi_max = node.rssi
+                
+                # Estimate distance from RSSI
+                estimated_dist = estimate_distance_from_rssi(node.rssi)
+                node.estimated_distance = estimated_dist
+                
+                # Format distance string
+                if estimated_dist < 1000:
+                    dist_str = f"{estimated_dist:.0f}m"
+                else:
+                    dist_str = f"{estimated_dist/1000:.1f}km"
+                
+                rssi_str = f" RSSI:{node.rssi}dBm (min:{node.rssi_min}, max:{node.rssi_max}) ~{dist_str}"
+                print(f"[DEBUG] Node {node_id} RSSI: {node.rssi} (min:{node.rssi_min}, max:{node.rssi_max}) Est.dist: {dist_str}")
+                
             if 'rxSnr' in packet:
                 node.snr = packet['rxSnr']
                 print(f"[DEBUG] Node {node_id} SNR: {node.snr}")
@@ -716,8 +899,25 @@ class MeshTrackerGUI:
             # Update node info
             node.update(packet, self.gps_data)
             
-            # Collect samples for position estimation
-            if node.rssi and self.gps_data.fix:
+            # If node has its own GPS position, use it directly
+            if node.latitude is not None and node.longitude is not None:
+                node.estimated_position = (node.latitude, node.longitude)
+                # Calculate distance if we have base station GPS
+                if self.gps_data.fix:
+                    distance = calculate_distance(
+                        self.gps_data.latitude, self.gps_data.longitude,
+                        node.latitude, node.longitude
+                    )
+                    distance_km = distance / 1000.0
+                    if distance_km < 1.0:
+                        distance_str = f"{distance:.0f}m"
+                    else:
+                        distance_str = f"{distance_km:.2f}km"
+                    self.log_calc(f"{node_name}: Position {node.latitude:.6f}, {node.longitude:.6f} - Distance: {distance_str}")
+                else:
+                    self.log_calc(f"{node_name}: Using node's GPS position: {node.latitude:.6f}, {node.longitude:.6f}")
+            # Otherwise collect RSSI samples for position estimation (requires moving base station)
+            elif node.rssi and self.gps_data.fix:
                 sample = {
                     'gps_lat': self.gps_data.latitude,
                     'gps_lon': self.gps_data.longitude,
@@ -1075,51 +1275,65 @@ class MeshTrackerGUI:
         
     def log_calc(self, message: str):
         """Log position calculation progress to the calc text area"""
-        try:
-            # Check if widget exists and is valid
-            if not hasattr(self, 'calc_text') or not self.calc_text.winfo_exists():
-                return
+        def _log():
+            try:
+                # Check if widget exists and is valid
+                if not hasattr(self, 'calc_text') or not self.calc_text.winfo_exists():
+                    return
+                    
+                timestamp = time.strftime("%H:%M:%S")
+                log_entry = f"[{timestamp}] {message}\n"
                 
-            timestamp = time.strftime("%H:%M:%S")
-            log_entry = f"[{timestamp}] {message}\n"
-            
-            # Enable writing, insert at beginning, then disable
-            self.calc_text.config(state='normal')
-            self.calc_text.insert('1.0', log_entry)
-            
-            # Keep only last 50 lines
-            lines = self.calc_text.get('1.0', tk.END).split('\n')
-            if len(lines) > 50:
-                self.calc_text.delete(f'{50}.0', tk.END)
-            
-            self.calc_text.config(state='disabled')
-            self.calc_text.see('1.0')  # Scroll to top
-        except Exception as e:
-            print(f"[ERROR] Log calc error: {e}")
+                # Enable writing, insert at beginning, then disable
+                self.calc_text.config(state='normal')
+                self.calc_text.insert('1.0', log_entry)
+                
+                # Keep only last 50 lines
+                lines = self.calc_text.get('1.0', tk.END).split('\n')
+                if len(lines) > 50:
+                    self.calc_text.delete(f'{50}.0', tk.END)
+                
+                self.calc_text.config(state='disabled')
+                self.calc_text.see('1.0')  # Scroll to top
+            except Exception as e:
+                print(f"[ERROR] Log calc error: {e}")
+        
+        # Schedule on main thread if we have root
+        if hasattr(self, 'root'):
+            self.root.after(0, _log)
+        else:
+            _log()
         
     def log_traffic(self, message: str):
         """Log mesh traffic to the traffic text area"""
-        try:
-            # Check if widget exists and is valid
-            if not hasattr(self, 'traffic_text') or not self.traffic_text.winfo_exists():
-                return
+        def _log():
+            try:
+                # Check if widget exists and is valid
+                if not hasattr(self, 'traffic_text') or not self.traffic_text.winfo_exists():
+                    return
+                    
+                timestamp = time.strftime("%H:%M:%S")
+                log_entry = f"[{timestamp}] {message}\n"
                 
-            timestamp = time.strftime("%H:%M:%S")
-            log_entry = f"[{timestamp}] {message}\n"
-            
-            # Enable writing, insert at beginning, then disable
-            self.traffic_text.config(state='normal')
-            self.traffic_text.insert('1.0', log_entry)
-            
-            # Keep only last 50 lines
-            lines = self.traffic_text.get('1.0', tk.END).split('\n')
-            if len(lines) > 50:
-                self.traffic_text.delete(f'{50}.0', tk.END)
-            
-            self.traffic_text.config(state='disabled')
-            self.traffic_text.see('1.0')  # Scroll to top
-        except Exception as e:
-            print(f"[ERROR] Log traffic error: {e}")
+                # Enable writing, insert at beginning, then disable
+                self.traffic_text.config(state='normal')
+                self.traffic_text.insert('1.0', log_entry)
+                
+                # Keep only last 50 lines
+                lines = self.traffic_text.get('1.0', tk.END).split('\n')
+                if len(lines) > 50:
+                    self.traffic_text.delete(f'{50}.0', tk.END)
+                
+                self.traffic_text.config(state='disabled')
+                self.traffic_text.see('1.0')  # Scroll to top
+            except Exception as e:
+                print(f"[ERROR] Log traffic error: {e}")
+        
+        # Schedule on main thread if we have root
+        if hasattr(self, 'root'):
+            self.root.after(0, _log)
+        else:
+            _log()
         
     def quit_app(self):
         """Gracefully quit the application"""
