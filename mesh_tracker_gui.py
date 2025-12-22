@@ -1985,7 +1985,7 @@ class MeshTrackerGUI:
             print(f"[DEBUG] Displaying {len(sorted_nodes)} nodes in list")
             displayed_count = 0
             for node_id, node in sorted_nodes:
-                age = int(time.time() - node.last_seen)
+                age = int(current_time - node.last_seen)
                 displayed_count += 1
                 
                 # Use short name
