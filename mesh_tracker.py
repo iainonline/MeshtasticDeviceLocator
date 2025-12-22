@@ -609,7 +609,7 @@ class MeshTracker:
             
             node = self.nodes[node_id]
             
-            # Extract user info if available
+            # Extract user info if available in packet
             if 'user' in packet:
                 user = packet['user']
                 if isinstance(user, dict):
@@ -621,6 +621,29 @@ class MeshTracker:
                     node.short_name = user.shortName
                 if hasattr(user, 'longName'):
                     node.long_name = user.longName
+            
+            # If we still don't have proper names, try to get them from mesh interface's nodeDB
+            if (node.long_name == "Unknown" or node.short_name == "Unknown"):
+                if self.mesh_interface and hasattr(self.mesh_interface, 'nodes'):
+                    # Try both with and without '!' prefix
+                    lookup_ids = [node_id]
+                    if node_id.startswith('!'):
+                        lookup_ids.append(node_id[1:])
+                    else:
+                        lookup_ids.append('!' + node_id)
+                    
+                    for lookup_id in lookup_ids:
+                        if lookup_id in self.mesh_interface.nodes:
+                            node_info = self.mesh_interface.nodes[lookup_id]
+                            if 'user' in node_info and node_info['user']:
+                                user_data = node_info['user']
+                                if 'shortName' in user_data and user_data['shortName'] and node.short_name == "Unknown":
+                                    node.short_name = user_data['shortName']
+                                    self.debug_log(f"Updated short name from nodeDB: {node.short_name}")
+                                if 'longName' in user_data and user_data['longName'] and node.long_name == "Unknown":
+                                    node.long_name = user_data['longName']
+                                    self.debug_log(f"Updated long name from nodeDB: {node.long_name}")
+                            break
             
             # Extract position if available
             if 'decoded' in packet and 'position' in packet['decoded']:
@@ -1249,8 +1272,17 @@ class MeshTracker:
             age_str = f"{age}s" if age < 60 else f"{age//60}m"
             rssi_str = f"{node.rssi}" if node.rssi else "N/A"
             
-            # Truncate long name if too long
-            long_name = node.long_name[:20] if len(node.long_name) <= 20 else node.long_name[:17] + "..."
+            # Use long name, fall back to short name if long name is Unknown or same as short name
+            display_name = node.long_name
+            if display_name == "Unknown" or display_name == node.short_name:
+                # If we still don't have a good name, format the node ID nicely
+                if node.short_name != "Unknown":
+                    display_name = node.short_name
+                else:
+                    display_name = f"Meshtastic {node.node_id[-4:]}"
+            
+            # Truncate if too long
+            long_name = display_name[:20] if len(display_name) <= 20 else display_name[:17] + "..."
             
             node_table.add_row(
                 str(idx),
@@ -1328,12 +1360,15 @@ class MeshTracker:
             )
             compass = bearing_to_compass(bearing)
         
-        # Main info panel - Navigation only (no signal tracking)
+        # Main info panel
         info_table = Table(show_header=False, box=box.SIMPLE, padding=(0, 2))
         info_table.add_column("Key", style="cyan", width=20)
         info_table.add_column("Value", style="white bold", width=30)
         
-        # Get signal trend data (will be used in Estimated Position panel)
+        # Signal Tracking Panel - Show hotter/colder trends
+        tracking_info = []
+        
+        # Get trends for different time windows
         trend_10s = node.get_signal_trend(10)
         trend_60s = node.get_signal_trend(60)
         trend_5m = node.get_signal_trend(300)
@@ -1364,14 +1399,18 @@ class MeshTracker:
         
         if distance is not None:
             dist_str = format_distance(distance)
-            info_table.add_row("DISTANCE", f"{dist_str} (from estimated position)")
+            # Show which position source was used for calculation
+            if position_type == "ESTIMATED":
+                info_table.add_row("DISTANCE", f"{dist_str} (using estimated location)")
+            else:
+                info_table.add_row("DISTANCE", f"{dist_str} (using GPS location)")
         else:
             # Show why we can't calculate distance
             reason = ""
             if not self.gps_data.fix:
                 reason = "No GPS fix on Pi"
-            elif not node.estimated_position:
-                reason = "No estimated position yet"
+            elif node.latitude is None or node.longitude is None:
+                reason = "Node has no position data"
             else:
                 reason = "Unknown"
             info_table.add_row("DISTANCE", f"Unknown ({reason})")
@@ -1382,7 +1421,27 @@ class MeshTracker:
             compass_visual = self.create_compass_visual(bearing)
             info_table.add_row("DIRECTION", compass_visual)
         else:
-            info_table.add_row("BEARING", "Waiting for estimated position...")
+            info_table.add_row("BEARING", "Waiting for position data...")
+        
+        # Add signal tracking trends
+        info_table.add_row("", "")  # Spacer
+        if trend_10s:
+            change_str = f"{change_10s:+.1f} dBm" if change_10s else ""
+            info_table.add_row(f"Last 10 seconds {get_trend_emoji(trend_10s)}", 
+                             Text(f"{trend_10s.upper()} {change_str}", style=get_trend_style(trend_10s)))
+        
+        if trend_60s:
+            change_str = f"{change_60s:+.1f} dBm" if change_60s else ""
+            info_table.add_row(f"Last 60 seconds {get_trend_emoji(trend_60s)}", 
+                             Text(f"{trend_60s.upper()} {change_str}", style=get_trend_style(trend_60s)))
+        
+        if trend_5m:
+            change_str = f"{change_5m:+.1f} dBm" if change_5m else ""
+            info_table.add_row(f"Last 5 minutes {get_trend_emoji(trend_5m)}", 
+                             Text(f"{trend_5m.upper()} {change_str}", style=get_trend_style(trend_5m)))
+        
+        if not trend_10s and not trend_60s and not trend_5m:
+            info_table.add_row("Signal Trend", Text("Collecting data...", style="dim white"))
         
         # Add target node movement status
         info_table.add_row("", "")  # Spacer
@@ -1401,7 +1460,7 @@ class MeshTracker:
             else:
                 info_table.add_row("Your Status", Text("🚗 You are moving", style="dim yellow"))
         
-        info_panel = Panel(info_table, title="Navigation", border_style="green", box=box.DOUBLE)
+        info_panel = Panel(info_table, title="Navigation & Signal Tracking", border_style="green", box=box.DOUBLE)
         
         # Node details
         detail_table = Table(show_header=False, box=box.SIMPLE, padding=(0, 1))
@@ -1429,7 +1488,7 @@ class MeshTracker:
         
         detail_panel = Panel(detail_table, title="Node Details", border_style="blue")
         
-        # Dedicated Estimated Position Panel with signal tracking and rolling algorithm updates
+        # Dedicated Estimated Position Panel with rolling algorithm updates
         est_position_table = Table(show_header=False, box=box.SIMPLE, padding=(0, 1))
         est_position_table.add_column("Info", style="white", width=70)
         
@@ -1459,28 +1518,6 @@ class MeshTracker:
                 est_position_table.add_row(Text(f"Confidence: {'Medium' if len(node.estimation_samples) >= 10 else 'Low'} ({len(node.estimation_samples)} RSSI samples)", style="dim yellow"))
             else:
                 est_position_table.add_row(Text(f"⏳ Collecting data... ({len(node.estimation_samples)}/3 samples minimum)", style="yellow"))
-            
-            est_position_table.add_row(Text("", style="dim"))  # Spacer
-            
-            # Add signal tracking trends - 3 separate lines
-            est_position_table.add_row(Text("Signal Tracking:", style="bold cyan"))
-            if trend_10s:
-                change_str = f" {change_10s:+.1f} dBm" if change_10s else ""
-                est_position_table.add_row(Text(f"  Last 10 seconds: {get_trend_emoji(trend_10s)} {trend_10s.upper()}{change_str}", style=get_trend_style(trend_10s)))
-            else:
-                est_position_table.add_row(Text("  Last 10 seconds: ⏳ Collecting data...", style="dim white"))
-            
-            if trend_60s:
-                change_str = f" {change_60s:+.1f} dBm" if change_60s else ""
-                est_position_table.add_row(Text(f"  Last 1 minute:   {get_trend_emoji(trend_60s)} {trend_60s.upper()}{change_str}", style=get_trend_style(trend_60s)))
-            else:
-                est_position_table.add_row(Text("  Last 1 minute:   ⏳ Collecting data...", style="dim white"))
-            
-            if trend_5m:
-                change_str = f" {change_5m:+.1f} dBm" if change_5m else ""
-                est_position_table.add_row(Text(f"  Last 5 minutes:  {get_trend_emoji(trend_5m)} {trend_5m.upper()}{change_str}", style=get_trend_style(trend_5m)))
-            else:
-                est_position_table.add_row(Text("  Last 5 minutes:  ⏳ Collecting data...", style="dim white"))
             
             est_position_table.add_row(Text("", style="dim"))  # Spacer
             
@@ -1557,7 +1594,10 @@ class MeshTracker:
             # Add estimated position info
             distance_table.add_row(Text("", style="dim"))
             distance_table.add_row(Text("📍 FROM", style="bold magenta"))
-            distance_table.add_row(Text("Estimated Position", style="dim yellow"))
+            if position_type == "ESTIMATED":
+                distance_table.add_row(Text("Estimated Pos.", style="dim yellow"))
+            else:
+                distance_table.add_row(Text("GPS Position", style="dim cyan"))
         else:
             # No navigation data until first position estimate
             distance_table.add_row(Text("⏳ Awaiting Position", style="yellow"))
@@ -1567,6 +1607,8 @@ class MeshTracker:
                 distance_table.add_row(Text("position estimate", style="dim white"))
             elif not self.gps_data.fix:
                 distance_table.add_row(Text("Need GPS fix", style="dim white"))
+            elif not (node_lat and node_lon):
+                distance_table.add_row(Text("Need node position", style="dim white"))
         
         distance_panel = Panel(distance_table, title="📍 Navigation", border_style="green", box=box.ROUNDED)
         
@@ -1688,6 +1730,18 @@ class MeshTracker:
             import select
             import termios
             import tty
+            
+            # Check if we're running in a proper terminal
+            if not sys.stdin.isatty():
+                self.console.print("[yellow]Warning: Not running in a terminal. Interactive mode disabled.[/yellow]")
+                self.console.print("[yellow]Press Ctrl+C to exit.[/yellow]")
+                # Just keep running without interactive mode
+                try:
+                    while self.running:
+                        time.sleep(1)
+                except KeyboardInterrupt:
+                    pass
+                return
             
             # Set terminal to raw mode for immediate key capture
             old_settings = termios.tcgetattr(sys.stdin)
