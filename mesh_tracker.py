@@ -1423,6 +1423,8 @@ class MeshTracker:
         bearing = None
         compass = None
         position_type = None
+        node_lat = None
+        node_lon = None
         
         # ONLY use estimated position - this is the whole point of triangulation
         if (self.gps_data.fix and node.estimated_position):
