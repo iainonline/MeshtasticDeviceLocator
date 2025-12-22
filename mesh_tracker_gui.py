@@ -15,6 +15,7 @@ import math
 import argparse
 import re
 import subprocess
+import logging
 from datetime import datetime
 from collections import defaultdict
 from typing import Dict, List, Optional, Tuple
@@ -582,9 +583,15 @@ class MeshTrackerGUI:
     """Main GUI application"""
     
     def __init__(self, root, gps_port=2947, meshtastic_port=None, 
-                 path_loss_exp=2.5, tx_power=14.0, freq_mhz=915.0, enable_logging=False):
+                 path_loss_exp=2.5, tx_power=14.0, freq_mhz=915.0, enable_logging=False, verbose=False):
         self.root = root
         self.root.title("Meshtastic Node Tracker")
+        self.verbose = verbose
+        
+        # Set logging level based on verbose flag
+        if verbose:
+            logger.setLevel(logging.DEBUG)
+            logger.debug("Verbose logging enabled")
         
         # Set reasonable window size (fits most screens)
         window_width = 900
@@ -771,17 +778,17 @@ class MeshTrackerGUI:
         
     def gps_receiver_thread(self):
         """Receive GPS data via UDP"""
-        print(f"[DEBUG] Starting GPS receiver on port {self.gps_port}")
+        logger.info(f"Starting GPS receiver on port {self.gps_port}")
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
             sock.bind(('', self.gps_port))
             sock.settimeout(1.0)
-            print(f"[DEBUG] GPS receiver bound to port {self.gps_port}")
+            logger.info(f"GPS receiver bound to port {self.gps_port}")
         except Exception as e:
-            print(f"[ERROR] Failed to bind GPS port {self.gps_port}: {e}")
-            print(f"[INFO] Will continue without GPS - check if gpsd forwarder is running")
+            logger.error(f"Failed to bind GPS port {self.gps_port}: {e}")
+            logger.info("Will continue without GPS - check if gpsd forwarder is running")
             return
         
         while self.running:
@@ -846,7 +853,7 @@ class MeshTrackerGUI:
                             except:
                                 pass
                                 
-                            print(f"[DEBUG] GPS Fix: {lat:.6f}, {lon:.6f}, Sats: {parts[7]}")
+                            logger.debug(f"GPS Fix: {lat:.6f}, {lon:.6f}, Sats: {parts[7]}")
                             
                             # Log GPS position after parsing (only GGA for complete data)
                             if self.enable_logging and self.log_file:
@@ -902,7 +909,7 @@ class MeshTrackerGUI:
                 print("[WARNING] Meshtastic library not available")
                 return False
                 
-            print(f"[DEBUG] Connecting to Meshtastic port: {self.meshtastic_port or 'auto-detect'}")
+            logger.info(f"Connecting to Meshtastic port: {self.meshtastic_port or 'auto-detect'}")
             
             # Subscribe to packets using pubsub BEFORE creating interface
             # This must be done before the interface is created to catch all packets
@@ -912,7 +919,7 @@ class MeshTrackerGUI:
             if not hasattr(self, '_pubsub_subscribed'):
                 pub.subscribe(self._packet_handler_callback, "meshtastic.receive")
                 self._pubsub_subscribed = True
-                print("[DEBUG] Meshtastic packet handler registered via pubsub")
+                logger.debug("Meshtastic packet handler registered via pubsub")
             
             # Close existing connection if any
             if self.mesh_interface:
@@ -2154,14 +2161,14 @@ class MeshTrackerGUI:
         
     def quit_app(self):
         """Gracefully quit the application"""
-        print("[DEBUG] Quit requested")
+        logger.info("Quit requested")
         self.cleanup()
         self.root.quit()
         self.root.destroy()
         
     def cleanup(self):
         """Cleanup on exit"""
-        print("[DEBUG] Cleanup called")
+        logger.info("Cleanup called")
         self.running = False
         if self.mesh_interface:
             try:
@@ -2190,15 +2197,19 @@ def main():
                         help='Frequency in MHz (default: 915.0)')
     parser.add_argument('--log-data', action='store_true',
                         help='Enable data logging to JSONL file')
+    parser.add_argument('--verbose', '-v', action='store_true',
+                        help='Enable verbose debug output')
     
     args = parser.parse_args()
     print(f"[DEBUG] GPS port: {args.gps_port}")
     print(f"[DEBUG] Meshtastic port: {args.meshtastic_port or 'auto-detect'}")
     
     root = tk.Tk()
-    print("[DEBUG] Creating GUI application")
+    logger.info("Creating GUI application")
     if args.log_data:
-        print("[DEBUG] Data logging enabled")
+        logger.info("Data logging enabled")
+    if args.verbose:
+        logger.info("Verbose mode enabled")
     app = MeshTrackerGUI(
         root,
         gps_port=args.gps_port,
@@ -2206,7 +2217,8 @@ def main():
         path_loss_exp=args.path_loss,
         tx_power=args.tx_power,
         freq_mhz=args.freq,
-        enable_logging=args.log_data
+        enable_logging=args.log_data,
+        verbose=args.verbose
     )
     
     def on_closing():
