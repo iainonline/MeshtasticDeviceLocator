@@ -343,16 +343,28 @@ class MeshTrackerGUI:
         while self.running:
             try:
                 data, _ = sock.recvfrom(1024)
-                nmea_data = json.loads(data.decode())
-                print(f"[DEBUG] GPS data received: {nmea_data}")
-                self.gps_data.update_from_nmea(nmea_data)
+                raw_data = data.decode().strip()
                 
-                # Update map position if we have a fix
-                if self.gps_data.fix:
-                    print(f"[DEBUG] GPS fix: {self.gps_data.latitude}, {self.gps_data.longitude}")
-                    self.update_tracker_position()
-                else:
-                    print(f"[DEBUG] No GPS fix yet")
+                # Skip empty data
+                if not raw_data:
+                    continue
+                
+                # Debug: show first 100 chars of raw data
+                print(f"[DEBUG] GPS raw data: {raw_data[:100]}")
+                
+                # Try to parse as JSON
+                try:
+                    nmea_data = json.loads(raw_data)
+                    print(f"[DEBUG] GPS JSON parsed successfully")
+                    self.gps_data.update_from_nmea(nmea_data)
+                    
+                    # Update map position if we have a fix
+                    if self.gps_data.fix:
+                        print(f"[DEBUG] GPS fix: {self.gps_data.latitude}, {self.gps_data.longitude}")
+                        self.update_tracker_position()
+                except json.JSONDecodeError as je:
+                    print(f"[DEBUG] Not JSON format (might be raw NMEA): {raw_data[:50]}")
+                    continue
                     
             except socket.timeout:
                 continue
