@@ -928,7 +928,16 @@ class MeshTrackerGUI:
                 node.estimation_samples.append(sample)
                 sample_count = len(node.estimation_samples)
                 print(f"[DEBUG] Sample collected for {node_id}, total: {sample_count}")
-                self.log_calc(f"{node_name}: Sample {sample_count} collected at ({self.gps_data.latitude:.6f}, {self.gps_data.longitude:.6f}) RSSI:{node.rssi}dBm")
+                
+                # Visual progress indicator
+                progress_bar = "█" * min(sample_count, 10) + "░" * max(0, 10 - sample_count)
+                self.log_calc(f"{node_name}: Sample {sample_count} [{progress_bar}] at ({self.gps_data.latitude:.6f}, {self.gps_data.longitude:.6f}) RSSI:{node.rssi}dBm")
+                
+                # Add movement suggestions
+                if sample_count == 1:
+                    self.log_calc(f"{node_name}: ✓ First sample! Now move 50-100m in a different direction")
+                elif sample_count == 2:
+                    self.log_calc(f"{node_name}: ✓ Two samples! Move to 3rd position (try forming a triangle)")
                 
                 if len(node.estimation_samples) > 200:
                     node.estimation_samples.pop(0)
@@ -936,10 +945,11 @@ class MeshTrackerGUI:
                 # Estimate position if we have enough samples
                 if len(node.estimation_samples) >= 3:
                     print(f"[DEBUG] Estimating position for {node_id}")
-                    self.log_calc(f"{node_name}: Starting position estimation with {sample_count} samples...")
+                    self.log_calc(f"{node_name}: 📍 Calculating position with {sample_count} samples...")
                     self.estimate_node_position(node)
                 elif sample_count < 3:
-                    self.log_calc(f"{node_name}: Need {3 - sample_count} more samples for estimation")
+                    remaining = 3 - sample_count
+                    self.log_calc(f"{node_name}: Need {remaining} more sample{'s' if remaining > 1 else ''} to start estimation")
             else:
                 print(f"[DEBUG] Not collecting sample: RSSI={node.rssi}, GPS fix={self.gps_data.fix}")
                     
@@ -980,7 +990,22 @@ class MeshTrackerGUI:
                 
                 node.estimated_position = (filtered_lat, filtered_lon)
                 
-                self.log_calc(f"{node_name}: Kalman filtered position: {filtered_lat:.6f}, {filtered_lon:.6f}")
+                # Calculate sample quality metrics
+                rssi_values = [s['rssi'] for s in samples]
+                avg_rssi = np.mean(rssi_values)
+                std_rssi = np.std(rssi_values)
+                
+                # Determine confidence level
+                confidence = "HIGH"
+                if len(samples) < 5:
+                    confidence = "LOW"
+                elif len(samples) < 10:
+                    confidence = "MEDIUM"
+                elif std_rssi > 15:
+                    confidence = "MEDIUM"  # High variance in signal
+                
+                self.log_calc(f"{node_name}: Position: {filtered_lat:.6f}, {filtered_lon:.6f}")
+                self.log_calc(f"{node_name}: Confidence: {confidence} (RSSI avg:{avg_rssi:.0f}dBm, σ:{std_rssi:.1f}dB)")
                 
                 # Calculate distance and bearing if we have GPS
                 if self.gps_data.fix:
@@ -993,7 +1018,13 @@ class MeshTrackerGUI:
                         filtered_lat, filtered_lon
                     )
                     compass = bearing_to_compass(bearing)
-                    self.log_calc(f"{node_name}: LOCATED! Distance: {format_distance(dist)}, Bearing: {bearing:.0f}° ({compass})")
+                    self.log_calc(f"{node_name}: 🎯 LOCATED! Distance: {format_distance(dist)}, Bearing: {bearing:.0f}° ({compass})")
+                    
+                    # Add improvement suggestions based on confidence
+                    if confidence == "LOW":
+                        self.log_calc(f"{node_name}: 💡 Collect {10-len(samples)} more samples for better accuracy")
+                    elif confidence == "MEDIUM" and std_rssi > 15:
+                        self.log_calc(f"{node_name}: 💡 High signal variance - try moving to more consistent locations")
                 
                 # Update map marker
                 if node.node_id == self.selected_node:
@@ -1141,10 +1172,27 @@ class MeshTrackerGUI:
                                         key=lambda x: x[1].last_seen, 
                                         reverse=True):
                 age = int(time.time() - node.last_seen)
-                rssi = node.rssi if node.rssi else -999
                 name = node.short_name if node.short_name != "Unknown" else node_id[-4:]
                 
-                display = f"{name:12s} {rssi:4d}dBm {age:3d}s"
+                # Format RSSI with distance estimate
+                if node.rssi:
+                    rssi_str = f"{node.rssi:4d}dBm"
+                    # Add distance estimate from RSSI
+                    if node.estimated_distance:
+                        if node.estimated_distance < 1000:
+                            dist_str = f" ~{node.estimated_distance:.0f}m"
+                        else:
+                            dist_str = f" ~{node.estimated_distance/1000:.1f}km"
+                        rssi_str += dist_str
+                else:
+                    rssi_str = "  N/A    "
+                
+                # Add sample indicator if collecting
+                sample_indicator = ""
+                if len(node.estimation_samples) > 0:
+                    sample_indicator = f" [{len(node.estimation_samples)}📍]"
+                
+                display = f"{name:12s} {rssi_str:20s} {age:3d}s{sample_indicator}"
                 self.node_listbox.insert(tk.END, display)
             
             # Update info panel
@@ -1193,6 +1241,16 @@ class MeshTrackerGUI:
             info.append("*** ESTIMATED POSITION ***")
             info.append(f"Latitude:  {lat:.6f}°")
             info.append(f"Longitude: {lon:.6f}°")
+            
+            # Add confidence indicator
+            num_samples = len(node.estimation_samples)
+            if num_samples < 5:
+                confidence = "LOW (need more samples)"
+            elif num_samples < 10:
+                confidence = "MEDIUM"
+            else:
+                confidence = "HIGH"
+            info.append(f"Confidence: {confidence} ({num_samples} samples)")
             info.append("")
             
             if self.gps_data.fix:
@@ -1210,14 +1268,60 @@ class MeshTrackerGUI:
                 info.append(f"Distance:  {format_distance(dist)}")
                 info.append(f"Bearing:   {bearing:.0f}° ({compass})")
                 info.append("")
+                
+            # Add improvement suggestions
+            if num_samples < 10:
+                info.append("💡 TIP: Collect more samples to improve accuracy")
+                info.append("   Move 50-100m in different directions")
+                info.append("")
         else:
             info.append("*** POSITION NOT ESTIMATED ***")
-            info.append(f"Collecting samples: {len(node.estimation_samples)}/3 required")
-            info.append("Move around to collect more signal samples")
+            num_samples = len(node.estimation_samples)
+            info.append(f"Samples collected: {num_samples}/3 minimum")
+            
+            if num_samples == 0:
+                info.append("")
+                info.append("📍 GETTING STARTED:")
+                info.append("  1. Ensure GPS has a fix (see GPS tab)")
+                info.append("  2. Wait for signal from this node")
+                info.append("  3. Move to a new location (50m+)")
+                info.append("  4. Wait for another signal")
+                info.append("  5. Repeat for 3+ different positions")
+            elif num_samples == 1:
+                info.append("")
+                info.append("✓ First sample collected!")
+                info.append("")
+                info.append("📍 NEXT STEPS:")
+                info.append("  • Move at least 50 meters away")
+                info.append("  • Try a different direction")
+                info.append("  • Wait for next signal from this node")
+                info.append(f"  • Need {3-num_samples} more samples minimum")
+            elif num_samples == 2:
+                info.append("")
+                info.append("✓ Two samples collected!")
+                info.append("")
+                info.append("📍 ALMOST THERE:")
+                info.append("  • Move to a 3rd different location")
+                info.append("  • Form a triangle pattern for best results")
+                info.append("  • Wait for next signal")
+                info.append("  • Position will be estimated after 3rd sample")
             info.append("")
         
         info.append("Signal Quality:")
-        info.append(f"  RSSI: {node.rssi}dBm" if node.rssi else "  RSSI: N/A")
+        if node.rssi:
+            info.append(f"  RSSI: {node.rssi}dBm")
+            # Add RSSI-based distance estimate
+            if node.estimated_distance:
+                if node.estimated_distance < 1000:
+                    dist_str = f"{node.estimated_distance:.0f}m"
+                else:
+                    dist_str = f"{node.estimated_distance/1000:.1f}km"
+                info.append(f"  Est. Range: ~{dist_str} (from signal strength)")
+            # Show RSSI range if available
+            if node.rssi_min and node.rssi_max:
+                info.append(f"  RSSI Range: {node.rssi_min} to {node.rssi_max} dBm")
+        else:
+            info.append("  RSSI: N/A")
         info.append(f"  SNR: {node.snr:.1f}dB" if node.snr else "  SNR: N/A")
         info.append(f"  Last: {int(time.time() - node.last_seen)}s ago")
         info.append("")
