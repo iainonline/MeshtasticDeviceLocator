@@ -357,11 +357,12 @@ def calculate_destination(lat: float, lon: float, distance_meters: float, bearin
 
 class TestGPSDialog:
     """Dialog for creating test GPS movement samples"""
-    def __init__(self, parent, current_gps, test_node_location=None):
+    def __init__(self, parent, current_gps, test_node_location=None, node_info=None):
         self.parent = parent
         self.current_gps = current_gps  # (lat, lon)
         self.result = None
         self.test_node_location = test_node_location
+        self.node_info = node_info  # {'id': node_id, 'name': name, 'samples': count}
         
         # If no test node location, place it at current location
         if self.test_node_location is None:
@@ -377,8 +378,20 @@ class TestGPSDialog:
         self._populate_default_readings()
         
     def _create_widgets(self):
+        # Node being tested
+        if self.node_info:
+            node_header = ttk.Frame(self.dialog, padding=10)
+            node_header.pack(fill=tk.X)
+            
+            node_text = f"Testing Node: {self.node_info['name']} ({self.node_info['id']})"
+            if self.node_info.get('samples', 0) > 0:
+                node_text += f" - Current samples: {self.node_info['samples']}"
+            
+            ttk.Label(node_header, text=node_text,
+                     font=('Arial', 11, 'bold'), foreground='blue').pack()
+        
         # Instructions
-        info_frame = ttk.Frame(self.dialog, padding=10)
+        info_frame = ttk.Frame(self.dialog, padding=(10, 5, 10, 10))
         info_frame.pack(fill=tk.X)
         
         ttk.Label(info_frame, text="Create simulated GPS readings for testing position estimation",
@@ -390,9 +403,9 @@ class TestGPSDialog:
         node_frame = ttk.LabelFrame(self.dialog, text="Test Node Location", padding=10)
         node_frame.pack(fill=tk.X, padx=10, pady=5)
         
-        node_info = ttk.Frame(node_frame)
-        node_info.pack()
-        ttk.Label(node_info, text=f"Lat: {self.test_node_location[0]:.6f}°  "
+        node_loc_frame = ttk.Frame(node_frame)
+        node_loc_frame.pack()
+        ttk.Label(node_loc_frame, text=f"Lat: {self.test_node_location[0]:.6f}°  "
                                   f"Lon: {self.test_node_location[1]:.6f}°").pack()
         
         # Readings frame
@@ -441,6 +454,8 @@ class TestGPSDialog:
         
         ttk.Button(button_frame, text="Random Shift Node", 
                   command=self._random_shift).pack(side=tk.LEFT, padx=5)
+        ttk.Button(button_frame, text="Clear All Readings", 
+                  command=self._clear_readings).pack(side=tk.LEFT, padx=5)
         ttk.Button(button_frame, text="Create Readings", 
                   command=self._create_readings).pack(side=tk.RIGHT, padx=5)
         ttk.Button(button_frame, text="Cancel", 
@@ -527,6 +542,14 @@ class TestGPSDialog:
             self.reading_entries[i]['lon'].insert(0, f"{lon:.6f}")
             self.reading_entries[i]['rssi'].insert(0, str(rssi))
             self.reading_entries[i]['dist_label'].config(text=format_distance(dist))
+    
+    def _clear_readings(self):
+        """Clear all reading entries"""
+        for entry_set in self.reading_entries:
+            entry_set['lat'].delete(0, tk.END)
+            entry_set['lon'].delete(0, tk.END)
+            entry_set['rssi'].delete(0, tk.END)
+            entry_set['dist_label'].config(text="")
     
     def _create_readings(self):
         """Collect readings and close dialog"""
@@ -1033,6 +1056,15 @@ class MeshTrackerGUI:
         if not node:
             return
         
+        # Prepare node information for display
+        node_name = node.long_name if node.long_name != "Unknown" else \
+                   (node.short_name if node.short_name != "Unknown" else self.selected_node[-4:])
+        node_info = {
+            'id': self.selected_node,
+            'name': node_name,
+            'samples': len(node.estimation_samples)
+        }
+        
         # Use existing test node location if available, otherwise current GPS
         test_node_loc = getattr(self, '_test_node_location', None)
         if test_node_loc is None:
@@ -1041,7 +1073,8 @@ class MeshTrackerGUI:
         dialog = TestGPSDialog(
             self.root,
             (self.gps_data.latitude, self.gps_data.longitude),
-            test_node_loc
+            test_node_loc,
+            node_info
         )
         
         # Wait for dialog to close
