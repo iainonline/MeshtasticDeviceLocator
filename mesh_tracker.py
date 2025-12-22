@@ -199,8 +199,14 @@ class MeshNode:
         
         return avg_second - avg_first
     
-    def init_kalman_filter(self, initial_lat: float, initial_lon: float):
-        """Initialize Kalman filter for position tracking"""
+    def init_kalman_filter(self, initial_lat: float, initial_lon: float, initial_uncertainty: float = 50.0):
+        """Initialize Kalman filter for position tracking
+        
+        Args:
+            initial_lat: Initial latitude estimate
+            initial_lon: Initial longitude estimate  
+            initial_uncertainty: Initial position uncertainty in meters (default: 50m)
+        """
         # State: [lat, lon, vel_lat, vel_lon]
         # Constant velocity model
         self.kalman_filter = KalmanFilter(dim_x=4, dim_z=2)
@@ -220,19 +226,34 @@ class MeshNode:
             [0, 1, 0, 0]
         ])
         
-        # Initial state
+        # Initial state (assume stationary initially)
         self.kalman_filter.x = np.array([initial_lat, initial_lon, 0, 0])
         
         # Measurement noise (RMSE from trilateration)
-        self.kalman_filter.R = np.eye(2) * 0.0001  # Will be updated based on RMSE
+        # Convert initial uncertainty from meters to degrees
+        initial_noise_deg = initial_uncertainty / 111000.0
+        self.kalman_filter.R = np.eye(2) * (initial_noise_deg ** 2)
         
-        # Process noise (motion uncertainty)
-        self.kalman_filter.Q = np.eye(4) * 0.00001
+        # Process noise (motion uncertainty) - start conservative
+        process_noise_deg = 1.0 / 111000.0  # 1 meter process noise
+        self.kalman_filter.Q = np.array([
+            [process_noise_deg**2, 0, 0, 0],
+            [0, process_noise_deg**2, 0, 0],
+            [0, 0, (process_noise_deg/10)**2, 0],  # Velocity noise
+            [0, 0, 0, (process_noise_deg/10)**2]
+        ])
         
-        # Initial covariance
-        self.kalman_filter.P = np.eye(4) * 0.01
+        # Initial covariance - reflect initial uncertainty
+        initial_cov_deg = initial_uncertainty / 111000.0
+        self.kalman_filter.P = np.array([
+            [initial_cov_deg**2, 0, 0, 0],
+            [0, initial_cov_deg**2, 0, 0],
+            [0, 0, (initial_cov_deg/5)**2, 0],  # Velocity uncertainty
+            [0, 0, 0, (initial_cov_deg/5)**2]
+        ])
         
         self.last_update_time = time.time()
+        self.kalman_initialized = True
     
     def update_kalman_filter(self, measured_lat: float, measured_lon: float, measurement_noise: float):
         """Update Kalman filter with new measurement"""
@@ -508,6 +529,11 @@ class MeshTracker:
                     self.mesh_interface = meshtastic.serial_interface.SerialInterface(self.meshtastic_port)
                 else:
                     self.mesh_interface = meshtastic.serial_interface.SerialInterface()
+                
+                # Wait for nodeDB to populate (Meshtastic needs time to download node list)
+                if self.mesh_interface:
+                    self.console.print("[yellow]Connected to Meshtastic. Waiting for node database...[/yellow]")
+                    time.sleep(3)  # Give it time to populate the nodeDB
                 
                 # Also get existing nodes from nodeDB
                 if self.mesh_interface and hasattr(self.mesh_interface, 'nodes'):
@@ -890,21 +916,54 @@ class MeshTracker:
                 if node.estimated_position:
                     node.previous_position = node.estimated_position
                 
-                # Detect potential motion
+                # Detect potential motion with enhanced logic
                 motion_detected = False
+                motion_reason = ""
                 if node.previous_position:
                     prev_lat, prev_lon = node.previous_position
                     change_m = calculate_distance(prev_lat, prev_lon, est_lat, est_lon)
                     
-                    # Motion detected if moved >50m or RSSI std dev >10
-                    if change_m > 50 or node.metrics['std_rssi'] > 10:
+                    # Check Kalman velocity if available
+                    velocity_mag = 0.0
+                    if node.kalman_filter is not None and hasattr(node, 'kalman_initialized'):
+                        vel_lat = node.kalman_filter.x[2]  # degrees/s
+                        vel_lon = node.kalman_filter.x[3]
+                        # Convert to m/s
+                        vel_lat_ms = vel_lat * 111000
+                        vel_lon_ms = vel_lon * 111000
+                        velocity_mag = np.sqrt(vel_lat_ms**2 + vel_lon_ms**2)
+                    
+                    # Multi-factor motion detection:
+                    # 1. Significant position change (>50m)
+                    # 2. High RSSI variance suggesting changing signal environment
+                    # 3. Velocity from Kalman filter (>2 m/s)
+                    position_change_threshold = 50  # meters
+                    rssi_variance_threshold = 10   # dBm std dev
+                    velocity_threshold = 2.0        # m/s
+                    
+                    if change_m > position_change_threshold:
                         motion_detected = True
+                        motion_reason = f"position change {change_m:.1f}m"
+                    elif node.metrics['std_rssi'] > rssi_variance_threshold:
+                        motion_detected = True
+                        motion_reason = f"RSSI variance {node.metrics['std_rssi']:.1f}dBm"
+                    elif velocity_mag > velocity_threshold:
+                        motion_detected = True
+                        motion_reason = f"velocity {velocity_mag:.1f}m/s"
+                    
+                    if motion_detected:
                         node.metrics['motion_detected'] = True
-                        # Increase process noise in Kalman filter
+                        node.metrics['motion_reason'] = motion_reason
+                        # Adaptively increase process noise in Kalman filter
                         if node.kalman_filter is not None:
-                            node.kalman_filter.Q *= 2.0
+                            # Scale based on velocity/change magnitude
+                            scale_factor = min(5.0, 1.0 + max(change_m/50, velocity_mag/2))
+                            node.kalman_filter.Q *= scale_factor
                     else:
                         node.metrics['motion_detected'] = False
+                        # Gradually reduce process noise for stationary targets
+                        if node.kalman_filter is not None:
+                            node.kalman_filter.Q *= 0.95
                 
                 # Apply Kalman filtering if we have enough samples
                 if len(measurements) >= 5:
@@ -1057,11 +1116,32 @@ class MeshTracker:
             self.console.print(f"Grid: {grid_width}x{grid_height}, Samples: {len(samples)}, Range: {x_range:.1f}m x {y_range:.1f}m")
             self.console.print("="*80 + "\\n")
             
+            # Calculate estimated position grid coordinates if available
+            est_grid_x, est_grid_y = None, None
+            if node.estimated_position:
+                est_lat, est_lon = node.estimated_position
+                est_x = (est_lon - mean_lon) * lon_to_m
+                est_y = (est_lat - mean_lat) * lat_to_m
+                # Find which grid cell the estimate falls in
+                est_grid_x = np.searchsorted(x_edges, est_x) - 1
+                est_grid_y = np.searchsorted(y_edges, est_y) - 1
+                # Bounds check
+                if est_grid_x < 0 or est_grid_x >= grid_width:
+                    est_grid_x = None
+                if est_grid_y < 0 or est_grid_y >= grid_height:
+                    est_grid_y = None
+            
             # Print grid (top to bottom)
             for y_idx in reversed(range(grid_height)):
                 row_str = ""
                 for x_idx in range(grid_width):
-                    if np.isnan(grid_rssi[y_idx, x_idx]):
+                    # Check if this cell contains the estimated position
+                    is_estimate = (est_grid_x == x_idx and est_grid_y == y_idx)
+                    
+                    if is_estimate:
+                        # Mark estimated position with white 'X'
+                        row_str += "\\x1b[1;37mX\\x1b[0m"
+                    elif np.isnan(grid_rssi[y_idx, x_idx]):
                         # Empty cell
                         row_str += " "
                     else:
@@ -1784,6 +1864,33 @@ class MeshTracker:
                                 live.update(self.generate_node_list_view())
                             elif self.mode == "track":
                                 live.update(self.generate_tracking_view())
+                                
+                                # Auto-display heatmap if enabled and position was just estimated
+                                if self.auto_heatmap and self.selected_node:
+                                    node = self.nodes.get(self.selected_node)
+                                    if (node and node.estimated_position and 
+                                        len(node.estimation_samples) >= 10):
+                                        # Check if this is a new estimate (within last 2 seconds)
+                                        if node.estimation_log:
+                                            last_log = node.estimation_log[-1]
+                                            if '✓ Position:' in last_log:
+                                                # Extract timestamp from log
+                                                log_time_str = last_log.split(' - ')[0]
+                                                try:
+                                                    log_time = datetime.strptime(log_time_str, "%H:%M:%S")
+                                                    now_time = datetime.now()
+                                                    # Check if estimate is recent (within 2 seconds)
+                                                    time_diff = abs((now_time.hour * 3600 + now_time.minute * 60 + now_time.second) - 
+                                                                   (log_time.hour * 3600 + log_time.minute * 60 + log_time.second))
+                                                    if time_diff < 2:
+                                                        # Briefly pause live display to show heatmap
+                                                        live.stop()
+                                                        self.console.print("\n[cyan]Auto-displaying heatmap...[/cyan]")
+                                                        self.generate_terminal_heatmap(node, self.heatmap_grid)
+                                                        time.sleep(3)  # Show for 3 seconds
+                                                        live.start()
+                                                except (ValueError, AttributeError):
+                                                    pass
                             
                             # Capture screen periodically in debug mode
                             if self.debug:
