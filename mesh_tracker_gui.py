@@ -548,10 +548,12 @@ class MeshTrackerGUI:
                             # Update with info from nodeDB - wrap in try/except
                             try:
                                 if hasattr(node_info, 'user') and node_info.user:
-                                    if hasattr(node_info.user, 'longName'):
+                                    if hasattr(node_info.user, 'longName') and node_info.user.longName:
                                         self.nodes[node_id].long_name = node_info.user.longName
-                                    if hasattr(node_info.user, 'shortName'):
+                                        print(f"[DEBUG] Set long_name for {node_id}: {node_info.user.longName}")
+                                    if hasattr(node_info.user, 'shortName') and node_info.user.shortName:
                                         self.nodes[node_id].short_name = node_info.user.shortName
+                                        print(f"[DEBUG] Set short_name for {node_id}: {node_info.user.shortName}")
                             except Exception as attr_error:
                                 print(f"[DEBUG] Could not read user info for {node_id}: {attr_error}")
                     except Exception as e:
@@ -819,7 +821,11 @@ class MeshTrackerGUI:
                          reverse=True)
         if index < len(node_ids):
             self.selected_node = node_ids[index]
-            print(f"[DEBUG] Node selected: {self.selected_node}")
+            node = self.nodes.get(self.selected_node)
+            if node:
+                print(f"[DEBUG] Node selected: {self.selected_node}, short_name={node.short_name}, long_name={node.long_name}")
+            else:
+                print(f"[DEBUG] Node selected: {self.selected_node}")
             self.update_target_position()
             # Update info panel immediately
             if self.selected_node in self.nodes:
@@ -881,7 +887,11 @@ class MeshTrackerGUI:
         """Get formatted node information"""
         info = []
         info.append("=" * 45)
-        info.append(f"TARGET: {node.long_name}")
+        # Use short_name if long_name is Unknown, otherwise use node_id
+        display_name = node.long_name
+        if display_name == "Unknown":
+            display_name = node.short_name if node.short_name != "Unknown" else node.node_id[-8:]
+        info.append(f"TARGET: {display_name}")
         info.append("=" * 45)
         info.append("")
         
