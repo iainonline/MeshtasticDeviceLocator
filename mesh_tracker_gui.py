@@ -297,6 +297,8 @@ class MeshTrackerGUI:
         self.nodes: Dict[str, MeshNode] = {}
         self.selected_node: Optional[str] = None
         self.mesh_interface = None
+        self.mesh_connected = False
+        self.local_node_name = "Not Connected"
         self.running = True
         
         # Map markers
@@ -535,6 +537,23 @@ class MeshTrackerGUI:
             
             print("[DEBUG] Meshtastic connected, waiting for nodeDB...")
             time.sleep(3)  # Wait for nodeDB to populate
+            
+            # Get local node info
+            self.mesh_connected = True
+            try:
+                if hasattr(self.mesh_interface, 'myInfo') and self.mesh_interface.myInfo:
+                    my_node_id = self.mesh_interface.myInfo.my_node_num
+                    if my_node_id and my_node_id in self.mesh_interface.nodes:
+                        my_node = self.mesh_interface.nodes[my_node_id]
+                        if hasattr(my_node, 'user') and my_node.user:
+                            if hasattr(my_node.user, 'longName') and my_node.user.longName:
+                                self.local_node_name = my_node.user.longName
+                                print(f"[DEBUG] Local node name: {self.local_node_name}")
+                            elif hasattr(my_node.user, 'shortName') and my_node.user.shortName:
+                                self.local_node_name = my_node.user.shortName
+                                print(f"[DEBUG] Local node name: {self.local_node_name}")
+            except Exception as e:
+                print(f"[DEBUG] Could not get local node name: {e}")
             
             # Load existing nodes
             if self.mesh_interface and hasattr(self.mesh_interface, 'nodes'):
@@ -870,8 +889,9 @@ class MeshTrackerGUI:
             # Update status
             gps_status = "GPS: Fix" if self.gps_data.fix else "GPS: No Fix"
             node_count = len(self.nodes)
+            mesh_status = f"USB: {self.local_node_name}" if self.mesh_connected else "USB: Disconnected"
             self.status_label.config(
-                text=f"{gps_status} | Nodes: {node_count} | Selected: {self.selected_node or 'None'}"
+                text=f"{gps_status} | {mesh_status} | Nodes: {node_count} | Selected: {self.selected_node or 'None'}"
             )
             
         except Exception as e:
@@ -1088,6 +1108,8 @@ def main():
     print("[DEBUG] Starting GUI main loop")
     root.mainloop()
     print("[DEBUG] GUI closed")
+    import sys
+    sys.exit(0)
 
 
 if __name__ == '__main__':
