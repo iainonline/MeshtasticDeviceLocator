@@ -30,6 +30,14 @@ except ImportError:
     print("Warning: meshtastic library not found")
     meshtastic = None
 
+# Setup logger
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
+handler = logging.StreamHandler()
+formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+handler.setFormatter(formatter)
+logger.addHandler(handler)
+
 
 def check_device_timeout_errors(port: str) -> bool:
     """Check if device is reporting timeout errors in kernel log"""
@@ -219,6 +227,93 @@ class MeshNode:
             self.signal_history.append(history_entry)
             if len(self.signal_history) > 100:
                 self.signal_history.pop(0)
+    
+    def get_signal_trend(self, time_window: int) -> Optional[str]:
+        """Get signal trend over specified time window in seconds
+        Returns: 'hotter', 'colder', 'stable', or None if insufficient data
+        """
+        if len(self.signal_history) < 2:
+            return None
+        
+        current_time = time.time()
+        cutoff_time = current_time - time_window
+        
+        # Get recent readings
+        recent_readings = [h for h in self.signal_history if h['timestamp'] > cutoff_time]
+        
+        if len(recent_readings) < 2:
+            return None
+        
+        # Compare average of first half vs second half
+        mid_point = len(recent_readings) // 2
+        first_half = recent_readings[:mid_point]
+        second_half = recent_readings[mid_point:]
+        
+        avg_first = sum(h['rssi'] for h in first_half) / len(first_half)
+        avg_second = sum(h['rssi'] for h in second_half) / len(second_half)
+        
+        # RSSI is negative, so higher (less negative) is better
+        diff = avg_second - avg_first
+        
+        # Threshold for "significant" change (3 dBm)
+        if diff > 3:
+            return 'hotter'
+        elif diff < -3:
+            return 'colder'
+        else:
+            return 'stable'
+    
+    def get_signal_strength_change(self, time_window: int) -> Optional[float]:
+        """Get the actual dBm change over the time window"""
+        if len(self.signal_history) < 2:
+            return None
+        
+        current_time = time.time()
+        cutoff_time = current_time - time_window
+        
+        recent_readings = [h for h in self.signal_history if h['timestamp'] > cutoff_time]
+        
+        if len(recent_readings) < 2:
+            return None
+        
+        # Compare average of first half vs second half
+        mid_point = len(recent_readings) // 2
+        first_half = recent_readings[:mid_point]
+        second_half = recent_readings[mid_point:]
+        
+        avg_first = sum(h['rssi'] for h in first_half) / len(first_half)
+        avg_second = sum(h['rssi'] for h in second_half) / len(second_half)
+        
+        return avg_second - avg_first
+    
+    def get_last_n_signal_readings(self, n: int = 5) -> List[dict]:
+        """Get the last N signal readings with timestamps
+        
+        Args:
+            n: Number of readings to retrieve (default: 5)
+            
+        Returns:
+            List of dicts with 'timestamp', 'rssi', 'snr', and 'age' (seconds ago)
+        """
+        if not self.signal_history:
+            return []
+        
+        current_time = time.time()
+        # Get last N entries
+        last_n = self.signal_history[-n:] if len(self.signal_history) >= n else self.signal_history
+        
+        # Add age calculation
+        result = []
+        for entry in last_n:
+            age = current_time - entry['timestamp']
+            result.append({
+                'timestamp': entry['timestamp'],
+                'rssi': entry['rssi'],
+                'snr': entry.get('snr', 0),
+                'age': age
+            })
+        
+        return result
     
     def init_kalman_filter(self, initial_lat: float, initial_lon: float, initial_uncertainty: float = 50.0):
         """Initialize Kalman filter for position tracking"""
@@ -2044,6 +2139,50 @@ class MeshTrackerGUI:
             info.append("  RSSI: N/A")
         info.append(f"  SNR: {node.snr:.1f}dB" if node.snr else "  SNR: N/A")
         info.append(f"  Last: {int(time.time() - node.last_seen)}s ago")
+        info.append("")
+        
+        # Add signal trends for different time windows
+        info.append("Signal Trends (Hotter/Colder):")
+        trend_10s = node.get_signal_trend(10)
+        trend_60s = node.get_signal_trend(60)
+        trend_5m = node.get_signal_trend(300)
+        
+        change_10s = node.get_signal_strength_change(10)
+        change_60s = node.get_signal_strength_change(60)
+        change_5m = node.get_signal_strength_change(300)
+        
+        if trend_10s:
+            emoji = "🔥" if trend_10s == 'hotter' else "❄️" if trend_10s == 'colder' else "➡️"
+            change_str = f" ({change_10s:+.1f} dBm)" if change_10s else ""
+            info.append(f"  10s: {emoji} {trend_10s.upper()}{change_str}")
+        else:
+            info.append(f"  10s: (collecting data...)")
+        
+        if trend_60s:
+            emoji = "🔥" if trend_60s == 'hotter' else "❄️" if trend_60s == 'colder' else "➡️"
+            change_str = f" ({change_60s:+.1f} dBm)" if change_60s else ""
+            info.append(f"  60s: {emoji} {trend_60s.upper()}{change_str}")
+        else:
+            info.append(f"  60s: (collecting data...)")
+        
+        if trend_5m:
+            emoji = "🔥" if trend_5m == 'hotter' else "❄️" if trend_5m == 'colder' else "➡️"
+            change_str = f" ({change_5m:+.1f} dBm)" if change_5m else ""
+            info.append(f"  5m:  {emoji} {trend_5m.upper()}{change_str}")
+        else:
+            info.append(f"  5m:  (collecting data...)")
+        
+        # Add last 5 signal readings
+        info.append("")
+        info.append("Last 5 Signal Readings:")
+        last_readings = node.get_last_n_signal_readings(5)
+        if last_readings:
+            for i, reading in enumerate(last_readings, 1):
+                age_str = f"{reading['age']:.0f}s ago" if reading['age'] < 60 else f"{reading['age']/60:.1f}m ago"
+                info.append(f"  {i}. RSSI: {reading['rssi']:4d}dBm, SNR: {reading['snr']:4.1f}dB ({age_str})")
+        else:
+            info.append("  (no readings yet)")
+        
         info.append("")
         info.append(f"ID: {node.node_id}")
         info.append(f"Samples: {len(node.estimation_samples)}")

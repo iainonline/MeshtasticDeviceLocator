@@ -199,6 +199,35 @@ class MeshNode:
         
         return avg_second - avg_first
     
+    def get_last_n_signal_readings(self, n: int = 5) -> List[dict]:
+        """Get the last N signal readings with timestamps
+        
+        Args:
+            n: Number of readings to retrieve (default: 5)
+            
+        Returns:
+            List of dicts with 'timestamp', 'rssi', 'snr', and 'age' (seconds ago)
+        """
+        if not self.signal_history:
+            return []
+        
+        current_time = time.time()
+        # Get last N entries
+        last_n = self.signal_history[-n:] if len(self.signal_history) >= n else self.signal_history
+        
+        # Add age calculation
+        result = []
+        for entry in last_n:
+            age = current_time - entry['timestamp']
+            result.append({
+                'timestamp': entry['timestamp'],
+                'rssi': entry['rssi'],
+                'snr': entry.get('snr', 0),
+                'age': age
+            })
+        
+        return result
+    
     def init_kalman_filter(self, initial_lat: float, initial_lon: float, initial_uncertainty: float = 50.0):
         """Initialize Kalman filter for position tracking
         
@@ -1526,6 +1555,23 @@ class MeshTracker:
         
         if not trend_10s and not trend_60s and not trend_5m:
             info_table.add_row("Signal Trend", Text("Collecting data...", style="dim white"))
+        
+        # Add last 5 signal readings
+        last_readings = node.get_last_n_signal_readings(5)
+        if last_readings:
+            info_table.add_row("", "")  # Spacer
+            info_table.add_row("Last 5 Readings", Text("(most recent last)", style="dim cyan"))
+            for i, reading in enumerate(last_readings, 1):
+                age_str = f"{reading['age']:.0f}s ago" if reading['age'] < 60 else f"{reading['age']/60:.1f}m ago"
+                rssi_text = Text(f"{i}. RSSI: {reading['rssi']:4d} dBm, SNR: {reading['snr']:4.1f} dB  ({age_str})")
+                # Color code based on signal strength
+                if reading['rssi'] > -70:
+                    rssi_text.stylize("green")
+                elif reading['rssi'] > -90:
+                    rssi_text.stylize("yellow")
+                else:
+                    rssi_text.stylize("red")
+                info_table.add_row("", rssi_text)
         
         # Add target node movement status
         info_table.add_row("", "")  # Spacer
