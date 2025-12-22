@@ -13,6 +13,7 @@ import json
 import time
 import math
 import argparse
+import re
 from datetime import datetime
 from collections import defaultdict
 from typing import Dict, List, Optional, Tuple
@@ -26,6 +27,41 @@ try:
 except ImportError:
     print("Warning: meshtastic library not found")
     meshtastic = None
+
+
+def parse_nmea_coordinate(coord_str: str, direction: str) -> Optional[float]:
+    """Parse NMEA coordinate format (DDMM.MMMM) to decimal degrees"""
+    try:
+        if not coord_str or coord_str == '':
+            return None
+        
+        # NMEA format: latitude DDMM.MMMM, longitude DDDMM.MMMM
+        if len(coord_str) < 4:
+            return None
+            
+        # Find decimal point
+        dot_pos = coord_str.find('.')
+        if dot_pos == -1:
+            return None
+        
+        # For latitude: DD (2 digits) + MM.MMMM
+        # For longitude: DDD (3 digits) + MM.MMMM
+        if len(coord_str) <= 9:  # Latitude
+            degrees = int(coord_str[:2])
+            minutes = float(coord_str[2:])
+        else:  # Longitude
+            degrees = int(coord_str[:3])
+            minutes = float(coord_str[3:])
+        
+        decimal = degrees + (minutes / 60.0)
+        
+        # Apply direction
+        if direction in ['S', 'W']:
+            decimal = -decimal
+            
+        return decimal
+    except (ValueError, IndexError):
+        return None
 
 
 class GPSData:
@@ -349,28 +385,91 @@ class MeshTrackerGUI:
                 if not raw_data:
                     continue
                 
-                # Debug: show first 100 chars of raw data
-                print(f"[DEBUG] GPS raw data: {raw_data[:100]}")
-                
-                # Try to parse as JSON
-                try:
-                    nmea_data = json.loads(raw_data)
-                    print(f"[DEBUG] GPS JSON parsed successfully")
-                    self.gps_data.update_from_nmea(nmea_data)
-                    
-                    # Update map position if we have a fix
+                # Check if it's NMEA format (starts with $)
+                if raw_data.startswith('$'):
+                    self.parse_nmea_sentence(raw_data)
+                    # Update map if we have a fix
                     if self.gps_data.fix:
-                        print(f"[DEBUG] GPS fix: {self.gps_data.latitude}, {self.gps_data.longitude}")
                         self.update_tracker_position()
-                except json.JSONDecodeError as je:
-                    print(f"[DEBUG] Not JSON format (might be raw NMEA): {raw_data[:50]}")
-                    continue
+                else:
+                    # Try JSON format
+                    try:
+                        nmea_data = json.loads(raw_data)
+                        self.gps_data.update_from_nmea(nmea_data)
+                        if self.gps_data.fix:
+                            self.update_tracker_position()
+                    except json.JSONDecodeError:
+                        continue
                     
             except socket.timeout:
                 continue
             except Exception as e:
                 print(f"[ERROR] GPS error: {e}")
                 time.sleep(1)
+                
+    def parse_nmea_sentence(self, sentence: str):
+        """Parse NMEA sentence and update GPS data"""
+        try:
+            parts = sentence.split(',')
+            sentence_type = parts[0]
+            
+            # GGA - Fix data
+            if sentence_type == '$GPGGA' or sentence_type == '$GNGGA':
+                if len(parts) >= 10:
+                    # parts[1] = time
+                    # parts[2] = latitude, parts[3] = N/S
+                    # parts[4] = longitude, parts[5] = E/W
+                    # parts[6] = fix quality
+                    # parts[7] = satellites
+                    # parts[9] = altitude
+                    
+                    if parts[6] in ['1', '2']:  # Valid fix
+                        lat = parse_nmea_coordinate(parts[2], parts[3])
+                        lon = parse_nmea_coordinate(parts[4], parts[5])
+                        
+                        if lat and lon:
+                            self.gps_data.latitude = lat
+                            self.gps_data.longitude = lon
+                            self.gps_data.fix = True
+                            
+                            try:
+                                self.gps_data.satellites = int(parts[7])
+                            except:
+                                pass
+                                
+                            try:
+                                alt_m = float(parts[9])
+                                self.gps_data.altitude = alt_m * 3.28084  # m to ft
+                            except:
+                                pass
+                                
+                            print(f"[DEBUG] GPS Fix: {lat:.6f}, {lon:.6f}, Sats: {parts[7]}")
+            
+            # RMC - Recommended minimum
+            elif sentence_type == '$GPRMC' or sentence_type == '$GNRMC':
+                if len(parts) >= 8:
+                    # parts[2] = status (A=valid, V=invalid)
+                    # parts[3] = latitude, parts[4] = N/S
+                    # parts[5] = longitude, parts[6] = E/W
+                    # parts[7] = speed in knots
+                    
+                    if parts[2] == 'A':  # Valid
+                        lat = parse_nmea_coordinate(parts[3], parts[4])
+                        lon = parse_nmea_coordinate(parts[5], parts[6])
+                        
+                        if lat and lon:
+                            self.gps_data.latitude = lat
+                            self.gps_data.longitude = lon
+                            self.gps_data.fix = True
+                            
+                            try:
+                                speed_knots = float(parts[7])
+                                self.gps_data.speed = speed_knots * 1.15078  # knots to mph
+                            except:
+                                pass
+                                
+        except Exception as e:
+            print(f"[DEBUG] NMEA parse error: {e}")
                 
     def mesh_receiver_thread(self):
         """Receive Meshtastic packets"""
