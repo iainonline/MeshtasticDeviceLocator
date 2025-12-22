@@ -424,40 +424,48 @@ class MeshTrackerGUI:
         
         # Top: Info panel
         info_frame = ttk.LabelFrame(right_frame, text="Tracking Information", padding=10)
-        info_frame.pack(fill=tk.X, pady=(0, 5))
+        info_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 5))
         
         self.info_text = scrolledtext.ScrolledText(info_frame, height=8, 
                                                     font=('Courier', 9),
                                                     wrap=tk.WORD)
         self.info_text.pack(fill=tk.BOTH, expand=True)
         
-        # Add mesh traffic log below info panel
-        traffic_frame = ttk.LabelFrame(right_frame, text="Mesh Traffic", padding=5)
-        traffic_frame.pack(fill=tk.X, pady=(0, 5))
+        # Bottom row: Traffic logs on left, map on right
+        bottom_frame = ttk.Frame(right_frame)
+        bottom_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 5))
         
-        self.traffic_text = scrolledtext.ScrolledText(traffic_frame, height=4, 
+        # Left side of bottom: stacked logs
+        logs_frame = ttk.Frame(bottom_frame)
+        logs_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 5))
+        
+        # Mesh traffic log
+        traffic_frame = ttk.LabelFrame(logs_frame, text="Mesh Traffic", padding=5)
+        traffic_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 5))
+        
+        self.traffic_text = scrolledtext.ScrolledText(traffic_frame, height=6, 
                                                        font=('Courier', 8),
                                                        wrap=tk.WORD,
                                                        state='disabled')
         self.traffic_text.pack(fill=tk.BOTH, expand=True)
         
-        # Add calculation progress log
-        calc_frame = ttk.LabelFrame(right_frame, text="Position Calculation Progress", padding=5)
-        calc_frame.pack(fill=tk.X, pady=(0, 5))
+        # Calculation progress log
+        calc_frame = ttk.LabelFrame(logs_frame, text="Position Calculation Progress", padding=5)
+        calc_frame.pack(fill=tk.BOTH, expand=True)
         
-        self.calc_text = scrolledtext.ScrolledText(calc_frame, height=4, 
+        self.calc_text = scrolledtext.ScrolledText(calc_frame, height=6, 
                                                     font=('Courier', 8),
                                                     wrap=tk.WORD,
                                                     state='disabled')
         self.calc_text.pack(fill=tk.BOTH, expand=True)
         
-        # Middle: Map
-        map_frame = ttk.LabelFrame(right_frame, text="Map View", padding=5)
-        map_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 5))
+        # Right side of bottom: Square map (fixed size)
+        map_frame = ttk.LabelFrame(bottom_frame, text="Map View", padding=5)
+        map_frame.pack(side=tk.RIGHT, fill=tk.NONE, expand=False)
         
-        # Create map widget
-        self.map_widget = tkintermapview.TkinterMapView(map_frame, corner_radius=0)
-        self.map_widget.pack(fill=tk.BOTH, expand=True)
+        # Create map widget with fixed square dimensions
+        self.map_widget = tkintermapview.TkinterMapView(map_frame, width=400, height=400, corner_radius=0)
+        self.map_widget.pack()
         
         # Set default position (will be updated with GPS)
         self.map_widget.set_position(37.7749, -122.4194)
@@ -1139,11 +1147,13 @@ class MeshTrackerGUI:
             return
             
         index = selection[0]
-        node_ids = sorted(self.nodes.keys(), 
-                         key=lambda x: self.nodes[x].last_seen, 
-                         reverse=True)
-        if index < len(node_ids):
-            self.selected_node = node_ids[index]
+        # Get nodes sorted by RSSI (same as display)
+        nodes_with_rssi = [(node_id, node) for node_id, node in self.nodes.items() if node.rssi is not None]
+        sorted_nodes = sorted(nodes_with_rssi, key=lambda x: x[1].rssi, reverse=True)
+        top_nodes = sorted_nodes[:5]
+        
+        if index < len(top_nodes):
+            self.selected_node = top_nodes[index][0]
             node = self.nodes.get(self.selected_node)
             if node:
                 print(f"[DEBUG] Node selected: {self.selected_node}, short_name={node.short_name}, long_name={node.long_name}")
@@ -1163,36 +1173,44 @@ class MeshTrackerGUI:
             # Update tracker position on map (will only update if moved >10m)
             self.update_tracker_position()
             
-            # Update node list
+            # Update node list - show top 5 by signal strength
             self.node_listbox.delete(0, tk.END)
             node_count = len(self.nodes)
             print(f"[DEBUG] Updating display, {node_count} nodes")
             
-            for node_id, node in sorted(self.nodes.items(), 
-                                        key=lambda x: x[1].last_seen, 
-                                        reverse=True):
+            # Sort by RSSI (strongest signal first), filter out nodes without RSSI
+            nodes_with_rssi = [(node_id, node) for node_id, node in self.nodes.items() if node.rssi is not None]
+            sorted_nodes = sorted(nodes_with_rssi, key=lambda x: x[1].rssi, reverse=True)
+            
+            # Show only top 5
+            top_nodes = sorted_nodes[:5]
+            
+            for node_id, node in top_nodes:
                 age = int(time.time() - node.last_seen)
-                name = node.short_name if node.short_name != "Unknown" else node_id[-4:]
+                
+                # Use long name if available, otherwise short name
+                if node.long_name and node.long_name != "Unknown":
+                    name = node.long_name[:20]  # Truncate if too long
+                elif node.short_name != "Unknown":
+                    name = node.short_name
+                else:
+                    name = node_id[-4:]
                 
                 # Format RSSI with distance estimate
-                if node.rssi:
-                    rssi_str = f"{node.rssi:4d}dBm"
-                    # Add distance estimate from RSSI
-                    if node.estimated_distance:
-                        if node.estimated_distance < 1000:
-                            dist_str = f" ~{node.estimated_distance:.0f}m"
-                        else:
-                            dist_str = f" ~{node.estimated_distance/1000:.1f}km"
-                        rssi_str += dist_str
-                else:
-                    rssi_str = "  N/A    "
+                rssi_str = f"{node.rssi:4d}dBm"
+                if node.estimated_distance:
+                    if node.estimated_distance < 1000:
+                        dist_str = f" ~{node.estimated_distance:.0f}m"
+                    else:
+                        dist_str = f" ~{node.estimated_distance/1000:.1f}km"
+                    rssi_str += dist_str
                 
                 # Add sample indicator if collecting
                 sample_indicator = ""
                 if len(node.estimation_samples) > 0:
                     sample_indicator = f" [{len(node.estimation_samples)}📍]"
                 
-                display = f"{name:12s} {rssi_str:20s} {age:3d}s{sample_indicator}"
+                display = f"{name:20s} {rssi_str:20s} {age:3d}s{sample_indicator}"
                 self.node_listbox.insert(tk.END, display)
             
             # Update info panel
