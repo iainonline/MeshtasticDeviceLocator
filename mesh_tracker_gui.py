@@ -365,14 +365,19 @@ class MeshTrackerGUI:
         print("[DEBUG] Starting Meshtastic receiver")
         try:
             if meshtastic is None:
-                print("[ERROR] Meshtastic library not available")
+                print("[WARNING] Meshtastic library not available - running without mesh data")
                 return
                 
             print(f"[DEBUG] Connecting to Meshtastic port: {self.meshtastic_port or 'auto-detect'}")
-            if self.meshtastic_port:
-                self.mesh_interface = meshtastic.serial_interface.SerialInterface(self.meshtastic_port)
-            else:
-                self.mesh_interface = meshtastic.serial_interface.SerialInterface()
+            try:
+                if self.meshtastic_port:
+                    self.mesh_interface = meshtastic.serial_interface.SerialInterface(self.meshtastic_port)
+                else:
+                    self.mesh_interface = meshtastic.serial_interface.SerialInterface()
+            except Exception as conn_error:
+                print(f"[WARNING] Could not connect to Meshtastic: {conn_error}")
+                print("[INFO] GUI will continue without mesh data - connect device and restart")
+                return
             
             print("[DEBUG] Meshtastic connected, waiting for nodeDB...")
             time.sleep(3)  # Wait for nodeDB to populate
@@ -393,7 +398,8 @@ class MeshTrackerGUI:
                 print("[DEBUG] Meshtastic packet handler registered")
                 
         except Exception as e:
-            print(f"[ERROR] Meshtastic error: {e}")
+            print(f"[ERROR] Meshtastic thread error: {e}")
+            print("[INFO] Continuing without Meshtastic connection")
             import traceback
             traceback.print_exc()
             
