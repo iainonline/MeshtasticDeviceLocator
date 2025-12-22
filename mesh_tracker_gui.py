@@ -319,10 +319,13 @@ class MeshTrackerGUI:
         # File menu
         file_menu = tk.Menu(menubar, tearoff=0)
         menubar.add_cascade(label="File", menu=file_menu)
+        file_menu.add_command(label="Reconnect USB", command=self.reconnect_usb, accelerator="Ctrl+R")
+        file_menu.add_separator()
         file_menu.add_command(label="Quit", command=self.quit_app, accelerator="Ctrl+Q")
         
-        # Bind Ctrl+Q
+        # Bind shortcuts
         self.root.bind('<Control-q>', lambda e: self.quit_app())
+        self.root.bind('<Control-r>', lambda e: self.reconnect_usb())
         
         # Create main container
         main_frame = ttk.Frame(self.root)
@@ -516,15 +519,27 @@ class MeshTrackerGUI:
         except Exception as e:
             print(f"[DEBUG] NMEA parse error: {e}")
                 
-    def mesh_receiver_thread(self):
-        """Receive Meshtastic packets"""
-        print("[DEBUG] Starting Meshtastic receiver")
+    def connect_meshtastic(self):
+        """Connect or reconnect to Meshtastic device"""
         try:
             if meshtastic is None:
-                print("[WARNING] Meshtastic library not available - running without mesh data")
-                return
+                print("[WARNING] Meshtastic library not available")
+                return False
                 
             print(f"[DEBUG] Connecting to Meshtastic port: {self.meshtastic_port or 'auto-detect'}")
+            
+            # Close existing connection if any
+            if self.mesh_interface:
+                try:
+                    print("[DEBUG] Closing existing Meshtastic connection...")
+                    self.mesh_interface.close()
+                except:
+                    pass
+                self.mesh_interface = None
+                self.mesh_connected = False
+                self.local_node_name = "Not Connected"
+            
+            # Attempt new connection
             try:
                 if self.meshtastic_port:
                     self.mesh_interface = meshtastic.serial_interface.SerialInterface(self.meshtastic_port)
@@ -532,8 +547,8 @@ class MeshTrackerGUI:
                     self.mesh_interface = meshtastic.serial_interface.SerialInterface()
             except Exception as conn_error:
                 print(f"[WARNING] Could not connect to Meshtastic: {conn_error}")
-                print("[INFO] GUI will continue without mesh data - connect device and restart")
-                return
+                self.log_traffic(f"USB connection failed: {conn_error}")
+                return False
             
             print("[DEBUG] Meshtastic connected, waiting for nodeDB...")
             time.sleep(3)  # Wait for nodeDB to populate
@@ -589,7 +604,65 @@ class MeshTrackerGUI:
             if self.mesh_interface:
                 self.mesh_interface.on_receive = packet_handler
                 print("[DEBUG] Meshtastic packet handler registered")
-                
+                self.log_traffic(f"USB connected: {self.local_node_name}")
+                return True
+            
+            return False
+            
+        except Exception as e:
+            print(f"[ERROR] Connection error: {e}")
+            import traceback
+            traceback.print_exc()
+            return False
+    
+    def check_usb_device(self):
+        """Check if USB device is available"""
+        import glob
+        import os
+        
+        # Check for common USB serial device patterns
+        usb_patterns = [
+            '/dev/ttyUSB*',
+            '/dev/ttyACM*',
+            '/dev/cu.usbserial*',  # macOS
+            '/dev/cu.usbmodem*'     # macOS
+        ]
+        
+        for pattern in usb_patterns:
+            devices = glob.glob(pattern)
+            if devices:
+                print(f"[DEBUG] Found USB device(s): {devices}")
+                return True
+        
+        print("[DEBUG] No USB devices found")
+        return False
+    
+    def reconnect_usb(self):
+        """Reconnect to Meshtastic USB device"""
+        print("[DEBUG] Reconnect USB requested")
+        self.log_traffic("Reconnecting USB...")
+        
+        # Check if USB device is available
+        if not self.check_usb_device():
+            self.log_traffic("No USB device found - check connection")
+            print("[WARNING] No USB device found")
+            return
+        
+        # Run connection in separate thread to avoid blocking UI
+        def reconnect_thread():
+            success = self.connect_meshtastic()
+            if success:
+                print("[DEBUG] Reconnection successful")
+            else:
+                print("[DEBUG] Reconnection failed")
+        
+        threading.Thread(target=reconnect_thread, daemon=True).start()
+    
+    def mesh_receiver_thread(self):
+        """Receive Meshtastic packets"""
+        print("[DEBUG] Starting Meshtastic receiver")
+        try:
+            self.connect_meshtastic()
         except Exception as e:
             print(f"[ERROR] Meshtastic thread error: {e}")
             print("[INFO] Continuing without Meshtastic connection")
