@@ -330,11 +330,14 @@ class MeshTrackerGUI:
         print(f"[DEBUG] Starting GPS receiver on port {self.gps_port}")
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
             sock.bind(('', self.gps_port))
             sock.settimeout(1.0)
             print(f"[DEBUG] GPS receiver bound to port {self.gps_port}")
         except Exception as e:
             print(f"[ERROR] Failed to bind GPS port {self.gps_port}: {e}")
+            print(f"[INFO] Will continue without GPS - check if gpsd forwarder is running")
             return
         
         while self.running:
