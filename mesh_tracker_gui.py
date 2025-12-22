@@ -47,6 +47,31 @@ handler.setFormatter(formatter)
 logger.addHandler(handler)
 
 
+def make_json_serializable(obj):
+    """Convert objects to JSON-serializable format"""
+    if isinstance(obj, bytes):
+        return obj.hex()  # Convert bytes to hex string
+    elif isinstance(obj, bytearray):
+        return bytes(obj).hex()
+    elif type(obj).__name__ in ('mappingproxy', 'dict_keys', 'dict_values', 'dict_items'):
+        # Handle Python's internal dict types
+        try:
+            return make_json_serializable(dict(obj))
+        except (TypeError, ValueError):
+            return make_json_serializable(list(obj))
+    elif isinstance(obj, dict):
+        return {k: make_json_serializable(v) for k, v in obj.items()}
+    elif isinstance(obj, (list, tuple)):
+        return [make_json_serializable(item) for item in obj]
+    elif hasattr(obj, '__dict__'):  # Handle custom objects
+        try:
+            return make_json_serializable(obj.__dict__)
+        except RecursionError:
+            return str(obj)  # Fallback to string representation
+    else:
+        return obj
+
+
 def check_device_timeout_errors(port: str) -> bool:
     """Check if device is reporting timeout errors in kernel log"""
     try:
@@ -193,7 +218,60 @@ class MeshNode:
         self.kalman_initialized: bool = False
         self.last_update_time: Optional[float] = None
         self.signal_history: List[dict] = []
+        self.is_favorite: bool = False  # Track if node is favorited
+        self.signal_distance_estimate: Optional[float] = None  # Distance estimate from signal strength
+        self.signal_distance_history: List[Tuple[float, float]] = []  # (timestamp, distance) for tracking
+        self.hop_count: Optional[int] = None  # Number of hops (0 = direct)
         
+    def estimate_distance_from_signal(self, tx_power: float = 20.0, frequency_mhz: float = 915.0) -> Optional[float]:
+        """Estimate distance based on RSSI and SNR using free space path loss model
+        
+        Args:
+            tx_power: Transmit power in dBm (default 20 dBm for Meshtastic)
+            frequency_mhz: Frequency in MHz (915 for US, 868 for EU)
+        
+        Returns:
+            Estimated distance in meters, or None if insufficient data
+        """
+        if self.rssi is None:
+            return None
+        
+        # Use SNR to adjust confidence - lower SNR means less reliable estimate
+        # Good SNR (>5dB) use as-is, poor SNR apply correction factor
+        rssi_adjusted = self.rssi
+        if self.snr is not None:
+            if self.snr < -5:  # Very poor SNR
+                # Reduce confidence by making distance estimate more conservative
+                rssi_adjusted -= 5
+            elif self.snr < 0:  # Poor SNR
+                rssi_adjusted -= 2
+        
+        # Free space path loss formula:
+        # RSSI = TxPower - (20*log10(distance) + 20*log10(freq) + 32.44)
+        # Rearranged: distance = 10^((TxPower - RSSI - 20*log10(freq) - 32.44) / 20)
+        
+        import math
+        freq_loss = 20 * math.log10(frequency_mhz)
+        path_loss = tx_power - rssi_adjusted - freq_loss - 32.44
+        distance = 10 ** (path_loss / 20)
+        
+        # Apply environmental correction factor (typical 2.5-4 for outdoor/urban)
+        # Using moderate 3.0 for general case
+        distance_corrected = distance * 3.0
+        
+        # Store in history
+        current_time = time.time()
+        self.signal_distance_history.append((current_time, distance_corrected))
+        
+        # Keep only last 20 estimates (about 2 minutes at 6s update rate)
+        if len(self.signal_distance_history) > 20:
+            self.signal_distance_history.pop(0)
+        
+        # Update current estimate
+        self.signal_distance_estimate = distance_corrected
+        
+        return distance_corrected
+    
     def update(self, packet: dict, gps_data: Optional['GPSData'] = None):
         """Update node information from packet"""
         current_time = time.time()
@@ -516,7 +594,8 @@ class TestGPSDialog:
         self.dialog.title("Test GPS Movement Simulator")
         self.dialog.geometry("700x450")
         self.dialog.transient(parent)
-        self.dialog.grab_set()
+        # Remove grab_set() to allow interaction with main window
+        # self.dialog.grab_set()  # Commented out to allow seeing main GUI updates
         
         self._create_widgets()
         self._populate_default_readings()
@@ -715,11 +794,17 @@ class TestGPSDialog:
                 messagebox.showerror("Invalid Input", f"Reading #{i+1} has invalid values: {e}")
                 return
         
+        if not readings:
+            messagebox.showwarning("No Readings", "Please enter at least one reading.")
+            return
+        
         self.result = {
             'readings': readings,
             'test_node_location': self.test_node_location
         }
-        self.dialog.destroy()
+        
+        # Trigger the close event which will process results
+        self.dialog.event_generate("<<CloseDialog>>")
 
 
 class MeshTrackerGUI:
@@ -783,7 +868,18 @@ class MeshTrackerGUI:
         self.last_marker_position = None  # Track last marker position to reduce flicker
         self.last_gps_position = None  # Track last valid GPS position for when fix is lost
         
-        # Signal history persistence
+        # Favorite nodes persistence - load FIRST before signal history
+        self.favorites_file = Path('favorite_nodes.pkl')
+        self.favorite_nodes = set()  # Set of node IDs that are favorited
+        self.load_favorites()
+        
+        # Auto-traceroute feature
+        self.auto_traceroute_enabled = False
+        self.auto_traceroute_node = None
+        self.auto_traceroute_interval = 30  # seconds
+        self.auto_traceroute_timer = None
+        
+        # Signal history persistence - load AFTER favorites so nodes can be marked
         self.signal_history_file = Path('signal_history.pkl')
         self.load_signal_history()
         
@@ -806,6 +902,7 @@ class MeshTrackerGUI:
         # Bind shortcuts
         self.root.bind('<Control-q>', lambda e: self.quit_app())
         self.root.bind('<Control-r>', lambda e: self.reconnect_usb())
+        self.root.bind('<Control-f>', lambda e: self.toggle_favorite())  # Ctrl+F to toggle favorite
         
         # Create main container
         main_frame = ttk.Frame(self.root)
@@ -814,7 +911,6 @@ class MeshTrackerGUI:
         # Left panel - Node list
         left_frame = ttk.LabelFrame(main_frame, text="Mesh Nodes", padding=10)
         left_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=False, padx=(0, 5))
-        left_frame.config(width=300)
         
         # Node list with scrollbars (extends to bottom)
         list_frame = ttk.Frame(left_frame)
@@ -831,7 +927,8 @@ class MeshTrackerGUI:
         self.node_listbox = tk.Listbox(list_frame, 
                                         yscrollcommand=v_scrollbar.set,
                                         xscrollcommand=h_scrollbar.set,
-                                        font=('Courier', 9))
+                                        font=('Courier', 9),
+                                        width=30)  # Set fixed width in characters
         self.node_listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         v_scrollbar.config(command=self.node_listbox.yview)
         h_scrollbar.config(command=self.node_listbox.xview)
@@ -842,11 +939,37 @@ class MeshTrackerGUI:
         test_button_frame = ttk.Frame(left_frame)
         test_button_frame.pack(fill=tk.X, pady=(10, 0))
         
+        ttk.Button(test_button_frame, text="⭐ Toggle Favorite",
+                  command=self.toggle_favorite).pack(fill=tk.X, pady=(0, 5))
+        
         ttk.Button(test_button_frame, text="Test GPS Movement",
                   command=self.open_test_gps_dialog).pack(fill=tk.X, pady=(0, 5))
         
         ttk.Button(test_button_frame, text="Ping Selected Node",
-                  command=self.ping_selected_node).pack(fill=tk.X)
+                  command=self.ping_selected_node).pack(fill=tk.X, pady=(0, 5))
+        
+        # Auto-traceroute controls
+        traceroute_frame = ttk.LabelFrame(test_button_frame, text="Auto-Traceroute", padding=5)
+        traceroute_frame.pack(fill=tk.X, pady=(5, 0))
+        
+        self.auto_traceroute_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(traceroute_frame, text="Enable",
+                       variable=self.auto_traceroute_var,
+                       command=self.toggle_auto_traceroute).pack(anchor=tk.W)
+        
+        interval_frame = ttk.Frame(traceroute_frame)
+        interval_frame.pack(fill=tk.X, pady=(5, 0))
+        ttk.Label(interval_frame, text="Interval (s):").pack(side=tk.LEFT)
+        self.traceroute_interval_var = tk.StringVar(value="30")
+        interval_spin = ttk.Spinbox(interval_frame, from_=10, to=300, increment=10,
+                                   textvariable=self.traceroute_interval_var,
+                                   width=8)
+        interval_spin.pack(side=tk.LEFT, padx=(5, 0))
+        interval_spin.bind('<FocusOut>', lambda e: self.update_traceroute_interval())
+        interval_spin.bind('<Return>', lambda e: self.update_traceroute_interval())
+        
+        self.traceroute_status_label = ttk.Label(traceroute_frame, text="Disabled", foreground="gray")
+        self.traceroute_status_label.pack(anchor=tk.W, pady=(5, 0))
         
         # Right panel - Tracking view
         right_frame = ttk.Frame(main_frame)
@@ -968,6 +1091,9 @@ class MeshTrackerGUI:
                             # Create node if it doesn't exist
                             self.nodes[node_id] = MeshNode(node_id)
                         self.nodes[node_id].signal_history = signal_history
+                        # Mark as favorite if in favorites list
+                        if node_id in self.favorite_nodes:
+                            self.nodes[node_id].is_favorite = True
                 print(f"[DEBUG] Loaded signal history for {len(saved_data)} nodes")
             except Exception as e:
                 print(f"[WARNING] Could not load signal history: {e}")
@@ -984,6 +1110,58 @@ class MeshTrackerGUI:
             print(f"[DEBUG] Saved signal history for {len(saved_data)} nodes")
         except Exception as e:
             print(f"[WARNING] Could not save signal history: {e}")
+    
+    def load_favorites(self):
+        """Load favorite nodes from disk"""
+        if self.favorites_file.exists():
+            try:
+                with open(self.favorites_file, 'rb') as f:
+                    self.favorite_nodes = pickle.load(f)
+                print(f"[DEBUG] Loaded {len(self.favorite_nodes)} favorite nodes")
+                # Mark existing nodes as favorites
+                for node_id in self.favorite_nodes:
+                    if node_id in self.nodes:
+                        self.nodes[node_id].is_favorite = True
+            except Exception as e:
+                print(f"[WARNING] Could not load favorites: {e}")
+                self.favorite_nodes = set()
+    
+    def save_favorites(self):
+        """Save favorite nodes to disk"""
+        try:
+            with open(self.favorites_file, 'wb') as f:
+                pickle.dump(self.favorite_nodes, f)
+            print(f"[DEBUG] Saved {len(self.favorite_nodes)} favorite nodes")
+        except Exception as e:
+            print(f"[WARNING] Could not save favorites: {e}")
+    
+    def toggle_favorite(self):
+        """Toggle favorite status of selected node"""
+        if not self.selected_node:
+            messagebox.showwarning("No Node Selected", "Please select a node from the list first.")
+            return
+        
+        node = self.nodes.get(self.selected_node)
+        if not node:
+            return
+        
+        # Toggle favorite status
+        if self.selected_node in self.favorite_nodes:
+            self.favorite_nodes.remove(self.selected_node)
+            node.is_favorite = False
+            action = "removed from"
+        else:
+            self.favorite_nodes.add(self.selected_node)
+            node.is_favorite = True
+            action = "added to"
+        
+        self.save_favorites()
+        
+        node_name = node.short_name if node.short_name != "Unknown" else self.selected_node[-4:]
+        print(f"[DEBUG] Node {node_name} {action} favorites")
+        
+        # Update display to show star
+        self.update_display()
     
     def update_signal_plot(self, node: MeshNode):
         """Update the signal strength plot for the selected node"""
@@ -1025,7 +1203,9 @@ class MeshTrackerGUI:
                 else:
                     date_format = DateFormatter('%m/%d %H:%M')
                 self.signal_ax.xaxis.set_major_formatter(date_format)
-                self.signal_fig.autofmt_xdate()
+                
+                # Rotate and align the tick labels for better readability
+                plt.setp(self.signal_ax.xaxis.get_majorticklabels(), rotation=45, ha='right')
             
             self.signal_fig.tight_layout()
             self.signal_canvas.draw()
@@ -1309,6 +1489,9 @@ class MeshTrackerGUI:
                         # Create node objects for all nodes in database
                         if node_id not in self.nodes:
                             self.nodes[node_id] = MeshNode(node_id)
+                            # Mark as favorite if in favorites list
+                            if node_id in self.favorite_nodes:
+                                self.nodes[node_id].is_favorite = True
                             
                             # Set last_seen from nodeDB lastHeard time if available
                             if hasattr(node_info, 'lastHeard') and node_info.lastHeard:
@@ -1338,13 +1521,13 @@ class MeshTrackerGUI:
                 current_time = time.time()
                 recent_count = sum(1 for n in self.nodes.values() if (current_time - n.last_seen) < 600)
                 if recent_count > 0:
-                    self.log_traffic(f"ℹ {recent_count} nodes heard in last 10 min")
+                    self.log_traffic(f"{recent_count} nodes heard in last 10 min")
                 else:
-                    self.log_traffic(f"ℹ No recent mesh activity detected")
+                    self.log_traffic(f"No recent mesh activity detected")
             
             if self.mesh_interface:
-                self.log_traffic(f"✓ USB connected: {self.local_node_name} ({len(self.nodes)} nodes loaded)")
-                self.log_traffic(f"⟳ Listening for mesh packets...")
+                self.log_traffic(f"USB connected: {self.local_node_name} ({len(self.nodes)} nodes loaded)")
+                self.log_traffic(f"Listening for mesh packets...")
                 # Update display immediately to show connected status
                 if hasattr(self, 'root'):
                     self.root.after(100, self.update_display)
@@ -1441,36 +1624,49 @@ class MeshTrackerGUI:
             node_info
         )
         
-        # Wait for dialog to close
-        self.root.wait_window(dialog.dialog)
+        # Don't wait for dialog - allow it to stay open while viewing main GUI updates
+        # Users can see the GUI updating in real-time as they add test readings
+        # self.root.wait_window(dialog.dialog)  # Commented out to allow non-blocking
         
-        # Process results if any
-        if dialog.result:
-            self._test_node_location = dialog.result['test_node_location']
-            readings = dialog.result['readings']
-            
-            print(f"[TEST] === Adding {len(readings)} test readings ===")
-            print(f"[TEST] Target node: {self.selected_node}")
-            print(f"[TEST] Test node location: {self._test_node_location[0]:.6f}, {self._test_node_location[1]:.6f}")
-            
-            # Add readings to selected node
-            for i, reading in enumerate(readings):
-                print(f"[TEST] Reading {i+1}: GPS({reading['gps_lat']:.6f}, {reading['gps_lon']:.6f}), RSSI:{reading['rssi']}dBm")
-                node.estimation_samples.append(reading)
-            
-            sample_count = len(readings)
-            node_name = node.short_name if node.short_name != "Unknown" else self.selected_node[-4:]
-            
-            self.log_calc(f"TEST: Added {sample_count} simulated readings for {node_name}")
-            self.log_calc(f"TEST: Test node at {self._test_node_location[0]:.6f}, {self._test_node_location[1]:.6f}")
-            
-            # Trigger position estimation if enough samples
-            total_samples = len(node.estimation_samples)
-            if total_samples >= 3:
-                self.log_calc(f"{node_name}: 📍 Calculating position with {total_samples} samples...")
-                self.estimate_node_position(node)
-            else:
-                self.log_calc(f"{node_name}: Need {3 - total_samples} more samples for estimation")
+        # Store dialog reference for callback processing
+        def on_dialog_close():
+            # Process results if any
+            if dialog.result:
+                self._test_node_location = dialog.result['test_node_location']
+                readings = dialog.result['readings']
+                
+                print(f"[TEST] === Adding {len(readings)} test readings ===")
+                print(f"[TEST] Target node: {self.selected_node}")
+                print(f"[TEST] Test node location: {self._test_node_location[0]:.6f}, {self._test_node_location[1]:.6f}")
+                
+                # Add readings to selected node
+                node = self.nodes.get(self.selected_node)
+                if node:
+                    for i, reading in enumerate(readings):
+                        print(f"[TEST] Reading {i+1}: GPS({reading['gps_lat']:.6f}, {reading['gps_lon']:.6f}), RSSI:{reading['rssi']}dBm")
+                        node.estimation_samples.append(reading)
+                    
+                    sample_count = len(readings)
+                    node_name = node.short_name if node.short_name != "Unknown" else self.selected_node[-4:]
+                    
+                    self.log_calc(f"TEST: Added {sample_count} simulated readings for {node_name}")
+                    self.log_calc(f"TEST: Test node at {self._test_node_location[0]:.6f}, {self._test_node_location[1]:.6f}")
+                    
+                    # Trigger position estimation if enough samples
+                    total_samples = len(node.estimation_samples)
+                    if total_samples >= 3:
+                        self.log_calc(f"{node_name}: 📍 Calculating position with {total_samples} samples...")
+                        self.estimate_node_position(node)
+                    else:
+                        self.log_calc(f"{node_name}: Need {3 - total_samples} more samples for estimation")
+        
+        # Set up callback when dialog closes
+        def process_and_close():
+            on_dialog_close()
+            dialog.dialog.destroy()
+        
+        dialog.dialog.protocol("WM_DELETE_WINDOW", lambda: dialog.dialog.destroy())
+        dialog.dialog.bind("<<CloseDialog>>", lambda e: process_and_close())
     
     def reconnect_usb(self):
         """Reconnect to Meshtastic USB device with better error handling"""
@@ -1538,8 +1734,8 @@ class MeshTrackerGUI:
         """Handle incoming Meshtastic packet"""
         try:
             node_id = packet.get('fromId', packet.get('from'))
-            if not node_id:
-                print(f"[DEBUG] Packet has no fromId: {packet.keys()}")
+            if node_id is None or node_id == '':
+                print(f"[DEBUG] Packet has no valid fromId: {packet.keys()}")
                 return
             
             print(f"[DEBUG] Processing packet from {node_id}")
@@ -1547,35 +1743,13 @@ class MeshTrackerGUI:
             if node_id not in self.nodes:
                 print(f"[DEBUG] Creating new node: {node_id}")
                 self.nodes[node_id] = MeshNode(node_id)
+                # Mark as favorite if in favorites list
+                if node_id in self.favorite_nodes:
+                    self.nodes[node_id].is_favorite = True
             
             node = self.nodes[node_id]
             
-            # Log packet if logging enabled
-            if self.enable_logging and self.log_file:
-                try:
-                    from datetime import datetime
-                    log_entry = {
-                        'timestamp': datetime.now().isoformat(),
-                        'type': 'mesh',
-                        'data': {
-                            'from': node_id,
-                            'fromId': node_id,
-                            'decoded': packet.get('decoded', {}),
-                            'user': {
-                                'shortName': node.short_name,
-                                'longName': node.long_name
-                            }
-                        },
-                        'gps_position': {
-                            'latitude': self.gps_data.latitude,
-                            'longitude': self.gps_data.longitude,
-                            'altitude': self.gps_data.altitude
-                        } if self.gps_data.fix else None
-                    }
-                    self.log_file.write(json.dumps(log_entry) + '\n')
-                    self.log_file.flush()
-                except Exception as log_error:
-                    print(f"[ERROR] Logging failed: {log_error}")
+            # Skip initial logging - will log after processing with complete data
             
             # Update node name from mesh_interface if available
             if self.mesh_interface and hasattr(self.mesh_interface, 'nodes'):
@@ -1619,29 +1793,69 @@ class MeshTrackerGUI:
                 node.snr = packet['rxSnr']
                 print(f"[DEBUG] Node {node_id} SNR: {node.snr}")
             
-            # Log packet
-            node_name = node.short_name if node.short_name != "Unknown" else node_id[-4:]
-            self.log_traffic(f"RX: {node_name}{rssi_str}")
+            # Calculate hop count (hopStart - hopLimit = hops taken)
+            if 'hopStart' in packet and 'hopLimit' in packet:
+                node.hop_count = packet['hopStart'] - packet['hopLimit']
+                print(f"[DEBUG] Node {node_id} hops: {node.hop_count}")
             
-            # Log packet if logging enabled
+            # Determine packet type for display
+            packet_type_str = ""
+            decoded = packet.get('decoded', {})
+            if 'portnum' in decoded:
+                ptype = decoded.get('portnum', '')
+                # Map portnum to readable names
+                type_map = {
+                    'TEXT_MESSAGE_APP': 'TXT',
+                    'POSITION_APP': 'POS',
+                    'NODEINFO_APP': 'INFO',
+                    'ROUTING_APP': 'ROUTE',
+                    'ADMIN_APP': 'ADMIN',
+                    'TELEMETRY_APP': 'TELEM',
+                    'RANGE_TEST_APP': 'RANGE',
+                    'STORE_FORWARD_APP': 'S&F',
+                    'TRACEROUTE_APP': 'TRACE',
+                    'NEIGHBORINFO_APP': 'NEIGHBOR',
+                    'PAXCOUNTER_APP': 'PAX',
+                    'DETECTION_SENSOR_APP': 'DETECT'
+                }
+                packet_type_str = type_map.get(ptype, ptype[:8] if ptype else '')
+                if packet_type_str:
+                    packet_type_str = f" [{packet_type_str}]"
+            
+            # Log packet with type
+            node_name = node.short_name if node.short_name != "Unknown" else node_id[-4:]
+            self.log_traffic(f"RX: {node_name}{rssi_str}{packet_type_str}")
+            
+            # Log packet with all collected data
             if self.enable_logging and self.log_file:
                 try:
                     from datetime import datetime
+                    # Get packet type if available
+                    packet_type = 'UNKNOWN'
+                    decoded = packet.get('decoded', {})
+                    if 'portnum' in decoded:
+                        packet_type = decoded.get('portnum', 'UNKNOWN')
+                    
                     log_entry = {
                         'timestamp': datetime.now().isoformat(),
                         'type': 'mesh',
-                        'data': {
-                            'from': node_id,
-                            'fromId': node_id,
-                            'decoded': packet.get('decoded', {}),
+                        'packet_type': packet_type,
+                        'node': {
+                            'id': node_id,
+                            'shortName': node.short_name,
+                            'longName': node.long_name,
                             'rssi': node.rssi,
                             'snr': node.snr,
-                            'user': {
-                                'shortName': node.short_name,
-                                'longName': node.long_name
-                            }
+                            'is_favorite': node.is_favorite
                         },
-                        'gps_position': {
+                        'position': {
+                            'latitude': node.latitude,
+                            'longitude': node.longitude,
+                            'altitude': node.altitude
+                        } if node.latitude and node.longitude else None,
+                        'decoded': make_json_serializable(decoded),
+                        'raw_packet_keys': list(packet.keys()),
+                        'tracker_position': {
                             'latitude': self.gps_data.latitude,
                             'longitude': self.gps_data.longitude,
                             'altitude': self.gps_data.altitude
@@ -1651,6 +1865,8 @@ class MeshTrackerGUI:
                     self.log_file.flush()
                 except Exception as log_error:
                     print(f"[ERROR] Logging failed: {log_error}")
+                    import traceback
+                    traceback.print_exc()
             
             # Update node info
             node.update(packet, self.gps_data)
@@ -1695,15 +1911,13 @@ class MeshTrackerGUI:
                 print(f"[SAMPLE] Total samples for {node_id}: {sample_count}")
                 print(f"[DEBUG] Sample collected for {node_id}, total: {sample_count}")
                 
-                # Visual progress indicator
-                progress_bar = "█" * min(sample_count, 10) + "░" * max(0, 10 - sample_count)
-                self.log_calc(f"{node_name}: Sample {sample_count} [{progress_bar}] at ({self.gps_data.latitude:.6f}, {self.gps_data.longitude:.6f}) RSSI:{node.rssi}dBm")
+                self.log_calc(f"{node_name}: Sample {sample_count} at ({self.gps_data.latitude:.6f}, {self.gps_data.longitude:.6f}) RSSI:{node.rssi}dBm")
                 
                 # Add movement suggestions
                 if sample_count == 1:
-                    self.log_calc(f"{node_name}: ✓ First sample! Now move 50-100m in a different direction")
+                    self.log_calc(f"{node_name}: First sample! Now move 50-100m in a different direction")
                 elif sample_count == 2:
-                    self.log_calc(f"{node_name}: ✓ Two samples! Move to 3rd position (try forming a triangle)")
+                    self.log_calc(f"{node_name}: Two samples! Move to 3rd position (try forming a triangle)")
                 
                 if len(node.estimation_samples) > 200:
                     node.estimation_samples.pop(0)
@@ -2245,6 +2459,140 @@ class MeshTrackerGUI:
             traceback.print_exc()
             messagebox.showerror("Ping Failed", f"Failed to send position request: {str(e)}")
     
+    def send_traceroute(self, node_id: str):
+        """Send a traceroute to the specified node"""
+        print(f"[DEBUG] send_traceroute called for {node_id}")
+        print(f"[DEBUG] mesh_interface: {self.mesh_interface}, mesh_connected: {self.mesh_connected}")
+        
+        if not self.mesh_interface or not self.mesh_connected:
+            print(f"[WARN] Cannot send traceroute - not connected")
+            return
+        
+        # Run in background thread to avoid freezing GUI
+        def _send_in_background():
+            try:
+                node = self.nodes.get(node_id)
+                node_name = node.short_name if node and node.short_name != "Unknown" else node_id[-4:]
+                
+                print(f"[DEBUG] Attempting to send traceroute to {node_name} ({node_id})")
+                
+                # Send traceroute with hop limit of 7 (typical max hops in mesh networks)
+                self.mesh_interface.sendTraceRoute(dest=node_id, hopLimit=7)
+                
+                print(f"[DEBUG] Successfully sent traceroute to {node_name}")
+                
+                # Update GUI from main thread
+                self.root.after(0, lambda: self.log_traffic(f"Sent traceroute to {node_name}"))
+                
+            except Exception as e:
+                print(f"[ERROR] Failed to send traceroute: {e}")
+                import traceback
+                traceback.print_exc()
+                self.root.after(0, lambda: self.log_traffic(f"ERROR: Failed to send traceroute - {str(e)}"))
+        
+        thread = threading.Thread(target=_send_in_background, daemon=True)
+        thread.start()
+    
+    def toggle_auto_traceroute(self):
+        """Toggle auto-traceroute feature"""
+        print(f"[DEBUG] toggle_auto_traceroute called, checkbox state: {self.auto_traceroute_var.get()}")
+        
+        if not self.selected_node:
+            messagebox.showwarning("No Node Selected", "Please select a node from the list first.")
+            self.auto_traceroute_var.set(False)
+            return
+        
+        if not self.mesh_interface or not self.mesh_connected:
+            messagebox.showerror("Not Connected", "Meshtastic device is not connected.")
+            self.auto_traceroute_var.set(False)
+            return
+        
+        self.auto_traceroute_enabled = self.auto_traceroute_var.get()
+        print(f"[DEBUG] Auto-traceroute enabled: {self.auto_traceroute_enabled}")
+        
+        if self.auto_traceroute_enabled:
+            # Store the target node
+            self.auto_traceroute_node = self.selected_node
+            node = self.nodes.get(self.auto_traceroute_node)
+            node_name = node.short_name if node and node.short_name != "Unknown" else self.auto_traceroute_node[-4:]
+            
+            print(f"[DEBUG] Starting auto-traceroute for {node_name} ({self.auto_traceroute_node})")
+            
+            # Update status
+            self.traceroute_status_label.config(text=f"Active: {node_name}", foreground="green")
+            
+            # Send first traceroute immediately
+            print(f"[DEBUG] Sending initial traceroute...")
+            self.send_traceroute(self.auto_traceroute_node)
+            
+            # Schedule next traceroute
+            print(f"[DEBUG] Scheduling next traceroute in {self.auto_traceroute_interval}s")
+            self.schedule_next_traceroute()
+            
+            self.log_traffic(f"Auto-traceroute enabled for {node_name} (every {self.auto_traceroute_interval}s)")
+        else:
+            # Cancel scheduled traceroute
+            if self.auto_traceroute_timer:
+                self.root.after_cancel(self.auto_traceroute_timer)
+                self.auto_traceroute_timer = None
+                print(f"[DEBUG] Cancelled scheduled traceroute timer")
+            
+            self.traceroute_status_label.config(text="Disabled", foreground="gray")
+            self.auto_traceroute_node = None
+            self.log_traffic("Auto-traceroute disabled")
+    
+    def update_traceroute_interval(self):
+        """Update the traceroute interval"""
+        try:
+            interval = int(self.traceroute_interval_var.get())
+            if interval < 10:
+                interval = 10
+            elif interval > 300:
+                interval = 300
+            self.auto_traceroute_interval = interval
+            self.traceroute_interval_var.set(str(interval))
+            print(f"[DEBUG] Traceroute interval updated to {interval}s")
+        except ValueError:
+            pass
+    
+    def schedule_next_traceroute(self):
+        """Schedule the next auto-traceroute"""
+        if not self.auto_traceroute_enabled or not self.auto_traceroute_node:
+            return
+        
+        # Cancel existing timer
+        if self.auto_traceroute_timer:
+            self.root.after_cancel(self.auto_traceroute_timer)
+        
+        # Schedule next traceroute
+        self.auto_traceroute_timer = self.root.after(
+            self.auto_traceroute_interval * 1000,
+            self.execute_auto_traceroute
+        )
+    
+    def execute_auto_traceroute(self):
+        """Execute scheduled traceroute"""
+        print(f"[DEBUG] execute_auto_traceroute called")
+        print(f"[DEBUG] enabled: {self.auto_traceroute_enabled}, node: {self.auto_traceroute_node}")
+        
+        if not self.auto_traceroute_enabled or not self.auto_traceroute_node:
+            print(f"[DEBUG] Auto-traceroute not active, skipping")
+            return
+        
+        # Check if node still exists
+        if self.auto_traceroute_node in self.nodes:
+            print(f"[DEBUG] Executing scheduled traceroute to {self.auto_traceroute_node}")
+            self.send_traceroute(self.auto_traceroute_node)
+            # Schedule next one
+            self.schedule_next_traceroute()
+        else:
+            # Node no longer exists, disable auto-traceroute
+            print(f"[DEBUG] Node {self.auto_traceroute_node} no longer exists, disabling")
+            self.auto_traceroute_enabled = False
+            self.auto_traceroute_var.set(False)
+            self.traceroute_status_label.config(text="Node lost", foreground="red")
+            self.log_traffic("Auto-traceroute disabled: node no longer available")
+    
     def on_node_select(self, event):
         """Handle node selection from list"""
         selection = self.node_listbox.curselection()
@@ -2253,14 +2601,36 @@ class MeshTrackerGUI:
             
         index = selection[0]
         
+        # Account for long name lines - each node may have 1 or 2 lines
+        # We need to map the listbox index to the actual node index
+        node_index = 0
+        listbox_line = 0
+        
+        if hasattr(self, 'displayed_nodes'):
+            for i, (node_id, node) in enumerate(self.displayed_nodes):
+                if listbox_line == index:
+                    node_index = i
+                    break
+                # Check if this node has a long name line
+                listbox_line += 1
+                if node.long_name != "Unknown" and node.long_name != node.short_name:
+                    if listbox_line == index:
+                        node_index = i
+                        break
+                    listbox_line += 1
+        
         # Use the displayed nodes list that matches what's shown
-        if hasattr(self, 'displayed_nodes') and index < len(self.displayed_nodes):
-            self.selected_node = self.displayed_nodes[index][0]
+        if hasattr(self, 'displayed_nodes') and node_index < len(self.displayed_nodes):
+            self.selected_node = self.displayed_nodes[node_index][0]
             node = self.nodes.get(self.selected_node)
             if node:
                 print(f"[DEBUG] Node selected: {self.selected_node}, short_name={node.short_name}, long_name={node.long_name}")
             else:
                 print(f"[DEBUG] Node selected: {self.selected_node}")
+            
+            # Scroll to make the selected item visible (only when user clicks)
+            self.node_listbox.see(index)
+            
             self.update_target_position()
             # Update info panel immediately
             if self.selected_node in self.nodes:
@@ -2277,6 +2647,12 @@ class MeshTrackerGUI:
             # Update tracker position on map (will only update if moved >10m)
             self.update_tracker_position()
             
+            # Store current scroll position to restore later
+            try:
+                first_visible = self.node_listbox.yview()[0]
+            except:
+                first_visible = 0.0
+            
             # Update node list - show all nodes sorted by signal strength
             self.node_listbox.delete(0, tk.END)
             node_count = len(self.nodes)
@@ -2289,10 +2665,15 @@ class MeshTrackerGUI:
                 if node.rssi is not None or (current_time - node.last_seen) < 600
             ]
             
-            # Sort by last seen (most recent first)
+            # Sort by direct connections first (0 hops), then favorites, then SNR
             sorted_nodes = sorted(
                 filtered_nodes,
-                key=lambda x: -x[1].last_seen
+                key=lambda x: (
+                    x[1].hop_count if x[1].hop_count is not None else 999,  # Direct (0 hops) first
+                    -x[1].is_favorite,  # Then favorites
+                    -(x[1].snr if x[1].snr is not None else -999),  # Then by SNR (highest first)
+                    -x[1].last_seen  # Finally by most recent
+                )
             )
             
             # Store for selection handler
@@ -2304,9 +2685,12 @@ class MeshTrackerGUI:
                 age = int(current_time - node.last_seen)
                 displayed_count += 1
                 
+                # Add favorite star indicator
+                fav_star = "⭐" if node.is_favorite else ""
+                
                 # Use short name
                 if node.short_name != "Unknown":
-                    name = node.short_name[:10]  # Limit to 10 chars to make room for age
+                    name = node.short_name[:12]  # Increased from 10 to 12 chars
                 else:
                     name = node_id[-4:]
                 
@@ -2325,7 +2709,22 @@ class MeshTrackerGUI:
                             else:
                                 rssi_str += "="  # Stable
                 else:
-                    rssi_str = " N/A "
+                    rssi_str = "N/A "
+                
+                # Format SNR
+                if node.snr is not None:
+                    snr_str = f"{node.snr:5.1f}"
+                else:
+                    snr_str = "N/A  "
+                
+                # Format hop count
+                if node.hop_count is not None:
+                    if node.hop_count == 0:
+                        hop_str = "DIR"
+                    else:
+                        hop_str = f"{node.hop_count}h"
+                else:
+                    hop_str = "?"
                 
                 # Format age string
                 if age < 60:
@@ -2340,21 +2739,43 @@ class MeshTrackerGUI:
                 if len(node.estimation_samples) > 0:
                     sample_indicator = f"[{len(node.estimation_samples)}]"
                 
-                display = f"{name:10s} {rssi_str:5s}dB {age_str:4s} {sample_indicator}"
+                # Compact display with minimal whitespace
+                if fav_star:
+                    display = f"{fav_star}{name:12s} {rssi_str:5s}dB {snr_str}SNR {hop_str:3s} {age_str:3s} {sample_indicator}"
+                else:
+                    display = f"{name:12s} {rssi_str:5s}dB {snr_str}SNR {hop_str:3s} {age_str:3s} {sample_indicator}"
+                
                 self.node_listbox.insert(tk.END, display)
+                
+                # Add long name underneath if available and different from short name
+                if node.long_name != "Unknown" and node.long_name != node.short_name:
+                    # Indent the long name slightly
+                    long_name_display = f"  {node.long_name[:40]}"  # Limit to 40 chars
+                    self.node_listbox.insert(tk.END, long_name_display)
                 
             print(f"[DEBUG] Actually displayed {displayed_count} nodes in listbox")
             
-            # Restore selection if a node was selected
+            # Restore scroll position to prevent jumping
+            try:
+                self.node_listbox.yview_moveto(first_visible)
+            except:
+                pass
+            
+            # Restore selection if a node was selected (but don't auto-scroll)
             if self.selected_node:
-                # Find the index of the selected node in the displayed list
+                # Find the listbox line index for the selected node (accounting for long names)
+                listbox_line = 0
                 for idx, (node_id, node) in enumerate(self.displayed_nodes):
                     if node_id == self.selected_node:
                         self.node_listbox.selection_clear(0, tk.END)
-                        self.node_listbox.selection_set(idx)
-                        self.node_listbox.see(idx)  # Scroll to make it visible
-                        print(f"[DEBUG] Restored selection to index {idx} for node {self.selected_node}")
+                        self.node_listbox.selection_set(listbox_line)
+                        # Note: Removed .see(idx) to prevent annoying auto-scroll on every update
+                        print(f"[DEBUG] Restored selection to line {listbox_line} for node {self.selected_node}")
                         break
+                    listbox_line += 1
+                    # Skip long name line if present
+                    if node.long_name != "Unknown" and node.long_name != node.short_name:
+                        listbox_line += 1
             
             # Update node markers on map
             self.update_node_markers()
@@ -2362,6 +2783,11 @@ class MeshTrackerGUI:
             # Update info panel
             if self.selected_node and self.selected_node in self.nodes:
                 node = self.nodes[self.selected_node]
+                
+                # Continuously estimate distance from signal for target node
+                if node.rssi is not None:
+                    node.estimate_distance_from_signal()
+                
                 info = self.get_node_info(node)
                 self.info_text.delete('1.0', tk.END)
                 self.info_text.insert('1.0', info)
@@ -2479,6 +2905,22 @@ class MeshTrackerGUI:
                 info.append(f"  Last: {int(time.time() - node.last_seen)}s ago")
             if node.rssi_min and node.rssi_max:
                 info.append(f"  Range: {node.rssi_min} to {node.rssi_max} dBm")
+            
+            # Signal-based distance estimate
+            if node.signal_distance_estimate:
+                if node.signal_distance_estimate < 1000:
+                    info.append(f"  Signal Distance: {node.signal_distance_estimate:.0f}m")
+                else:
+                    info.append(f"  Signal Distance: {node.signal_distance_estimate/1000:.1f}km")
+                
+                # Show trend if we have history
+                if len(node.signal_distance_history) >= 2:
+                    recent = node.signal_distance_history[-1][1]
+                    older = node.signal_distance_history[0][1]
+                    change = recent - older
+                    if abs(change) > 50:  # Only show if significant change
+                        trend = "closer" if change < 0 else "farther"
+                        info.append(f"    Trend: {abs(change):.0f}m {trend}")
         else:
             info.append("  No signal data yet")
         info.append("")
@@ -2518,8 +2960,12 @@ class MeshTrackerGUI:
         last_readings = node.get_last_n_signal_readings(5)
         if last_readings:
             for i, reading in enumerate(last_readings, 1):
+                # Format timestamp
+                reading_time = datetime.fromtimestamp(reading['timestamp'])
+                time_str = reading_time.strftime('%m/%d %H:%M:%S')
+                
                 age_str = f"{reading['age']:.0f}s" if reading['age'] < 60 else f"{reading['age']/60:.1f}m"
-                info.append(f"  {i}. {reading['rssi']:4d}dBm  SNR:{reading['snr']:4.1f}dB  {age_str}")
+                info.append(f"  {i}. {time_str}  {reading['rssi']:4d}dBm  SNR:{reading['snr']:4.1f}dB  {age_str}")
         else:
             info.append("  (no readings yet)")
         
@@ -2646,6 +3092,7 @@ class MeshTrackerGUI:
         logger.info("Cleanup called")
         self.running = False
         self.save_signal_history()
+        self.save_favorites()
         if self.mesh_interface:
             try:
                 self.mesh_interface.close()
