@@ -2,6 +2,7 @@
 venv/
 env/
 ENV/
+.venv/
 
 # Python
 __pycache__/
@@ -22,9 +23,18 @@ build/
 *.swo
 *~
 
-# Logs
+# Logs and data files
 *.log
+*.jsonl
+*.txt
+!requirements.txt
+!last_selected_node.txt
 gps_log.json
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
 
 # OS
 .DS_Store

@@ -1,3 +1,6 @@
 gps3==0.33.3
 meshtastic>=2.2.0
 rich>=13.0.0
+numpy>=1.21.0
+scipy>=1.7.0
+filterpy>=1.4.5

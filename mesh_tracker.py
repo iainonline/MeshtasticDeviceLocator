@@ -14,6 +14,10 @@ from datetime import datetime
 from collections import defaultdict
 from typing import Dict, List, Optional, Tuple
 
+import numpy as np
+from scipy.optimize import least_squares
+from filterpy.kalman import KalmanFilter
+
 from rich.console import Console
 from rich.layout import Layout
 from rich.panel import Panel
@@ -88,7 +92,22 @@ class MeshNode:
         # For position estimation
         self.estimation_samples: List[dict] = []  # Store RSSI samples with GPS positions
         self.estimated_position: Optional[Tuple[float, float]] = None
+        self.previous_position: Optional[Tuple[float, float]] = None  # For motion detection
         self.estimation_log: List[str] = []  # Log of estimation process
+        # Real-time metrics
+        self.metrics: dict = {
+            'num_samples': 0,
+            'avg_rssi': None,
+            'std_rssi': None,
+            'rmse_error': None,
+            'bearing_spread': None,
+            'avg_sample_age': None,
+            'motion_detected': False,
+            'kalman_error': None
+        }
+        # Kalman filter for tracking
+        self.kalman_filter: Optional[KalmanFilter] = None
+        self.last_update_time: Optional[float] = None
         # For signal tracking (hotter/colder)
         self.signal_history: List[dict] = []  # Timestamped RSSI/SNR history with GPS positions
         
@@ -179,6 +198,81 @@ class MeshNode:
         avg_second = sum(h['rssi'] for h in second_half) / len(second_half)
         
         return avg_second - avg_first
+    
+    def init_kalman_filter(self, initial_lat: float, initial_lon: float):
+        """Initialize Kalman filter for position tracking"""
+        # State: [lat, lon, vel_lat, vel_lon]
+        # Constant velocity model
+        self.kalman_filter = KalmanFilter(dim_x=4, dim_z=2)
+        
+        # State transition matrix (constant velocity)
+        dt = 1.0  # Time step (will be updated dynamically)
+        self.kalman_filter.F = np.array([
+            [1, 0, dt, 0],
+            [0, 1, 0, dt],
+            [0, 0, 1, 0],
+            [0, 0, 0, 1]
+        ])
+        
+        # Measurement matrix (we measure position only)
+        self.kalman_filter.H = np.array([
+            [1, 0, 0, 0],
+            [0, 1, 0, 0]
+        ])
+        
+        # Initial state
+        self.kalman_filter.x = np.array([initial_lat, initial_lon, 0, 0])
+        
+        # Measurement noise (RMSE from trilateration)
+        self.kalman_filter.R = np.eye(2) * 0.0001  # Will be updated based on RMSE
+        
+        # Process noise (motion uncertainty)
+        self.kalman_filter.Q = np.eye(4) * 0.00001
+        
+        # Initial covariance
+        self.kalman_filter.P = np.eye(4) * 0.01
+        
+        self.last_update_time = time.time()
+    
+    def update_kalman_filter(self, measured_lat: float, measured_lon: float, measurement_noise: float):
+        """Update Kalman filter with new measurement"""
+        current_time = time.time()
+        
+        if self.kalman_filter is None:
+            self.init_kalman_filter(measured_lat, measured_lon)
+            return (measured_lat, measured_lon)
+        
+        # Update dt based on actual time elapsed
+        if self.last_update_time is not None:
+            dt = current_time - self.last_update_time
+            if dt > 0:
+                self.kalman_filter.F[0, 2] = dt
+                self.kalman_filter.F[1, 3] = dt
+        
+        # Predict step
+        self.kalman_filter.predict()
+        
+        # Update measurement noise based on RMSE
+        # Convert meters to approximate degrees (rough conversion at mid-latitudes)
+        noise_deg = measurement_noise / 111000  # meters to degrees
+        self.kalman_filter.R = np.eye(2) * (noise_deg ** 2)
+        
+        # Update step
+        z = np.array([measured_lat, measured_lon])
+        self.kalman_filter.update(z)
+        
+        self.last_update_time = current_time
+        
+        # Return filtered position
+        filtered_lat = self.kalman_filter.x[0]
+        filtered_lon = self.kalman_filter.x[1]
+        
+        # Calculate Kalman uncertainty from covariance
+        pos_variance = (self.kalman_filter.P[0, 0] + self.kalman_filter.P[1, 1]) / 2
+        kalman_error_deg = np.sqrt(pos_variance)
+        kalman_error_m = kalman_error_deg * 111000  # degrees to meters
+        
+        return (filtered_lat, filtered_lon, kalman_error_m)
 
 
 def calculate_distance(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
@@ -242,11 +336,27 @@ def format_distance(meters: float) -> str:
 class MeshTracker:
     """Main application for tracking mesh nodes"""
     
-    def __init__(self, gps_port: int = 2947, meshtastic_port: Optional[str] = None, debug: bool = False):
+    def __init__(self, gps_port: int = 2947, meshtastic_port: Optional[str] = None, debug: bool = False,
+                 path_loss_exp: float = 2.5, tx_power: float = 14.0, freq_mhz: float = 915.0,
+                 max_samples: Optional[int] = None, time_decay: float = 300.0,
+                 heatmap_grid: Tuple[int, int] = (20, 10), auto_heatmap: bool = False):
         self.console = Console()
         self.gps_port = gps_port
         self.meshtastic_port = meshtastic_port
         self.debug = debug
+        
+        # RSSI to distance conversion parameters
+        self.path_loss_exp = path_loss_exp
+        self.tx_power = tx_power
+        self.freq_mhz = freq_mhz
+        
+        # Data inclusion parameters
+        self.max_samples = max_samples  # None = all samples, or limit for performance
+        self.time_decay = time_decay  # Time constant for exponential decay (seconds)
+        
+        # Heatmap parameters
+        self.heatmap_grid = heatmap_grid
+        self.auto_heatmap = auto_heatmap
         
         # Data storage
         self.gps_data = GPSData()
@@ -545,9 +655,12 @@ class MeshTracker:
                     }
                     node.estimation_samples.append(sample)
                     self.debug_log(f"Added estimation sample for {node_id}")
-                    # Keep last 100 samples
-                    if len(node.estimation_samples) > 100:
-                        node.estimation_samples.pop(0)
+                    
+                    # Optional downsampling if >500 samples for performance
+                    if len(node.estimation_samples) > 500:
+                        # Keep every other sample
+                        node.estimation_samples = node.estimation_samples[::2]
+                        self.debug_log(f"Downsampled to {len(node.estimation_samples)} samples")
                     
                     # Try to estimate position if we have enough samples - ALWAYS estimate
                     if len(node.estimation_samples) >= 3:
@@ -581,10 +694,48 @@ class MeshTracker:
         except Exception:
             pass
     
+    def rssi_to_distance(self, rssi: float, tx_power: float = 14.0, freq_mhz: float = 915.0, path_loss_exp: float = 2.5) -> float:
+        """
+        Convert RSSI to estimated distance using log-distance path loss model with FSPL
+        
+        Args:
+            rssi: Received signal strength in dBm (typically -30 to -120)
+            tx_power: Transmit power in dBm (Meshtastic default ~14 dBm for US)
+            freq_mhz: Frequency in MHz (915 for US, 868 for EU)
+            path_loss_exp: Path loss exponent (2=free space, 2.5=outdoor, 3-4=urban)
+        
+        Returns:
+            Estimated distance in meters
+        
+        Formula: RSSI = TxPower - FSPL - 10*n*log10(d/d0)
+        FSPL at 1m: 20*log10(freq_MHz) + 20*log10(1) - 27.55
+        """
+        # Free space path loss at 1 meter reference distance
+        fspl_1m = 20 * math.log10(freq_mhz) + 20 * math.log10(1) - 27.55
+        
+        # Calculate distance
+        path_loss = tx_power - rssi - fspl_1m
+        distance = 10 ** (path_loss / (10 * path_loss_exp))
+        
+        return max(distance, 1.0)  # Minimum 1 meter
+    
     def estimate_node_position(self, node: MeshNode):
-        """Estimate node position using RSSI triangulation with verbose logging"""
+        """
+        Estimate node position using enhanced RSSI-based trilateration with:
+        - Outlier filtering (>2 std dev removed)
+        - SNR incorporation in weights
+        - Time-based decay weighting (recent samples prioritized)
+        - Diversity checks (bearing spread)
+        - SciPy least_squares optimization
+        - Real-time metrics (RMSE, bearing spread, etc.)
+        """
         try:
-            samples = node.estimation_samples
+            # Use configurable subset or all samples
+            if self.max_samples is not None:
+                samples = node.estimation_samples[-self.max_samples:]
+            else:
+                samples = node.estimation_samples
+            
             if len(samples) < 3:
                 timestamp_str = datetime.now().strftime("%H:%M:%S")
                 node.estimation_log.append(f"{timestamp_str} - Need 3 samples minimum, currently have {len(samples)}")
@@ -592,55 +743,187 @@ class MeshTracker:
                     node.estimation_log = node.estimation_log[-10:]
                 return
             
-            # Add verbose log entries
             timestamp_str = datetime.now().strftime("%H:%M:%S")
+            current_time = time.time()
             
-            # Log sample collection
-            node.estimation_log.append(f"{timestamp_str} - Processing {len(samples)} total RSSI samples from receiver")
+            # Update total samples collected metric
+            node.metrics['total_samples'] = len(node.estimation_samples)
             
-            # Calculate RSSI statistics for last 10 samples
-            recent_samples = samples[-10:]
-            rssi_values = [s['rssi'] for s in recent_samples]
-            min_rssi = min(rssi_values)
-            max_rssi = max(rssi_values)
-            avg_rssi = sum(rssi_values) / len(rssi_values)
+            # Step 1: Filter outliers using numpy
+            rssi_values = np.array([s['rssi'] for s in samples])
+            mean_rssi = np.mean(rssi_values)
+            std_rssi = np.std(rssi_values)
             
-            node.estimation_log.append(f"{timestamp_str} - RSSI range: {min_rssi:.1f} to {max_rssi:.1f} dBm (avg: {avg_rssi:.1f} dBm)")
+            # Keep samples within 2 std deviations
+            filtered_samples = []
+            for sample in samples:
+                if abs(sample['rssi'] - mean_rssi) <= 2 * std_rssi:
+                    filtered_samples.append(sample)
             
-            # Simple weighted centroid based on signal strength
-            # Stronger signals (less negative RSSI) indicate closer proximity
-            total_weight = 0
-            weighted_lat = 0
-            weighted_lon = 0
+            if len(filtered_samples) < 3:
+                node.estimation_log.append(f"{timestamp_str} - After outlier filtering: {len(filtered_samples)} samples (need 3+)")
+                if len(node.estimation_log) > 10:
+                    node.estimation_log = node.estimation_log[-10:]
+                return
             
-            node.estimation_log.append(f"{timestamp_str} - Applying exponential RSSI weighting algorithm...")
+            # Step 2: Calculate bearings for diversity check
+            if self.gps_data.fix:
+                my_lat = self.gps_data.latitude
+                my_lon = self.gps_data.longitude
+                bearings = []
+                for sample in filtered_samples:
+                    bearing = calculate_bearing(my_lat, my_lon, sample['gps_lat'], sample['gps_lon'])
+                    bearings.append(bearing)
+                
+                # Check diversity: std dev of bearings should be > 30 degrees
+                bearing_std = np.std(bearings)
+                if bearing_std < 30:
+                    node.estimation_log.append(f"{timestamp_str} - Insufficient sample diversity (bearing spread: {bearing_std:.1f}°, need >30°)")
+                    node.estimation_log.append(f"{timestamp_str} - Move to different positions around the node")
+                    if len(node.estimation_log) > 10:
+                        node.estimation_log = node.estimation_log[-10:]
+                    node.metrics['bearing_spread'] = bearing_std
+                    return
+                
+                node.metrics['bearing_spread'] = bearing_std
             
-            for sample in recent_samples:
-                # Convert RSSI to weight (stronger signal = higher weight)
-                # RSSI typically ranges from -120 (weak) to -30 (strong)
-                weight = 10 ** (sample['rssi'] / 20.0)  # Exponential weighting
-                weighted_lat += sample['gps_lat'] * weight
-                weighted_lon += sample['gps_lon'] * weight
-                total_weight += weight
+            # Step 3: Incorporate SNR and time-based decay into weights
+            measurements = []
+            for sample in filtered_samples:
+                # Base weight from RSSI
+                base_weight = 10 ** (sample['rssi'] / 20.0)
+                
+                # Enhanced weight with SNR if available
+                if sample.get('snr') is not None and sample['snr'] > 0:
+                    weight = base_weight * (sample['snr'] + 10)
+                else:
+                    weight = base_weight
+                
+                # Apply time-based decay: prioritize recent samples
+                sample_age = current_time - sample.get('timestamp', current_time)
+                time_decay_factor = np.exp(-sample_age / self.time_decay)
+                weight *= time_decay_factor
+                
+                distance = self.rssi_to_distance(sample['rssi'], 
+                                                tx_power=self.tx_power,
+                                                freq_mhz=self.freq_mhz,
+                                                path_loss_exp=self.path_loss_exp)
+                
+                measurements.append({
+                    'lat': sample['gps_lat'],
+                    'lon': sample['gps_lon'],
+                    'distance': distance,
+                    'rssi': sample['rssi'],
+                    'snr': sample.get('snr'),
+                    'weight': weight,
+                    'timestamp': sample.get('timestamp', current_time)
+                })
             
-            if total_weight > 0:
-                est_lat = weighted_lat / total_weight
-                est_lon = weighted_lon / total_weight
+            # Update metrics
+            node.metrics['num_samples'] = len(measurements)
+            node.metrics['avg_rssi'] = float(np.mean([m['rssi'] for m in measurements]))
+            node.metrics['std_rssi'] = float(np.std([m['rssi'] for m in measurements]))
+            
+            # Calculate average sample age
+            ages = [(current_time - m['timestamp']) for m in measurements]
+            node.metrics['avg_sample_age'] = float(np.mean(ages))
+            
+            node.estimation_log.append(f"{timestamp_str} - Using {len(measurements)} samples (avg RSSI: {node.metrics['avg_rssi']:.1f}±{node.metrics['std_rssi']:.1f} dBm)")
+            node.estimation_log.append(f"{timestamp_str} - Total collected: {node.metrics.get('total_samples', len(node.estimation_samples))}, avg age: {node.metrics['avg_sample_age']:.0f}s")
+            
+            # Step 4: SciPy least_squares trilateration
+            # Initial guess: weighted centroid
+            total_weight = sum(m['weight'] for m in measurements)
+            init_lat = sum(m['lat'] * m['weight'] for m in measurements) / total_weight
+            init_lon = sum(m['lon'] * m['weight'] for m in measurements) / total_weight
+            
+            # Define residual function for least_squares
+            def residuals(pos):
+                est_lat, est_lon = pos
+                resids = []
+                for m in measurements:
+                    calc_dist = calculate_distance(est_lat, est_lon, m['lat'], m['lon'])
+                    # Weighted residual
+                    resid = (calc_dist - m['distance']) * math.sqrt(m['weight'])
+                    resids.append(resid)
+                return resids
+            
+            # Optimize using least_squares
+            result = least_squares(residuals, [init_lat, init_lon], method='lm')
+            
+            if result.success:
+                est_lat, est_lon = result.x
+                
+                # Calculate RMSE for confidence metric
+                residual_values = np.array(residuals(result.x))
+                # Unweight the residuals for RMSE calculation
+                unweighted_residuals = []
+                for i, m in enumerate(measurements):
+                    unweighted_residuals.append(residual_values[i] / math.sqrt(m['weight']))
+                rmse = float(np.sqrt(np.mean(np.array(unweighted_residuals) ** 2)))
+                node.metrics['rmse_error'] = rmse
+                
+                # Store previous position for motion detection
+                if node.estimated_position:
+                    node.previous_position = node.estimated_position
+                
+                # Detect potential motion
+                motion_detected = False
+                if node.previous_position:
+                    prev_lat, prev_lon = node.previous_position
+                    change_m = calculate_distance(prev_lat, prev_lon, est_lat, est_lon)
+                    
+                    # Motion detected if moved >50m or RSSI std dev >10
+                    if change_m > 50 or node.metrics['std_rssi'] > 10:
+                        motion_detected = True
+                        node.metrics['motion_detected'] = True
+                        # Increase process noise in Kalman filter
+                        if node.kalman_filter is not None:
+                            node.kalman_filter.Q *= 2.0
+                    else:
+                        node.metrics['motion_detected'] = False
+                
+                # Apply Kalman filtering if we have enough samples
+                if len(measurements) >= 5:
+                    # Use Kalman filter for smoothing
+                    kalman_result = node.update_kalman_filter(est_lat, est_lon, rmse)
+                    if len(kalman_result) == 3:
+                        filtered_lat, filtered_lon, kalman_error = kalman_result
+                        node.metrics['kalman_error'] = kalman_error
+                        
+                        # Use Kalman filtered position
+                        final_lat, final_lon = filtered_lat, filtered_lon
+                        method_str = "SciPy + Kalman filter"
+                    else:
+                        # Fallback if Kalman returns only position
+                        final_lat, final_lon = kalman_result
+                        method_str = "SciPy + Kalman filter"
+                else:
+                    # Not enough samples for Kalman, use raw trilateration
+                    final_lat, final_lon = est_lat, est_lon
+                    method_str = "SciPy least_squares with time-decay"
                 
                 # Calculate change from previous estimate
                 change_msg = ""
                 if node.estimated_position:
                     old_lat, old_lon = node.estimated_position
-                    lat_change = abs(est_lat - old_lat) * 111000  # degrees to meters (approx)
-                    lon_change = abs(est_lon - old_lon) * 111000 * 0.8  # rough adjustment
-                    change_m = (lat_change**2 + lon_change**2)**0.5
+                    change_m = calculate_distance(old_lat, old_lon, final_lat, final_lon)
                     change_ft = change_m * 3.28084
-                    change_msg = f" (moved {change_ft:.1f}ft from last estimate)"
+                    change_msg = f" (moved {change_ft:.1f}ft)"
                 
-                node.estimated_position = (est_lat, est_lon)
+                node.estimated_position = (final_lat, final_lon)
                 
-                node.estimation_log.append(f"{timestamp_str} - ✓ Position calculated: {est_lat:.6f}, {est_lon:.6f}{change_msg}")
-                node.estimation_log.append(f"{timestamp_str} - Used {len(recent_samples)} weighted measurements, total weight: {total_weight:.4f}")
+                motion_flag = " 🚶 MOTION" if motion_detected else ""
+                node.estimation_log.append(f"{timestamp_str} - ✓ Position: {final_lat:.6f}, {final_lon:.6f}{change_msg}{motion_flag}")
+                node.estimation_log.append(f"{timestamp_str} - Method: {method_str}")
+                node.estimation_log.append(f"{timestamp_str} - Est. error: ±{rmse:.1f}m (RMSE)")
+                if node.metrics.get('kalman_error'):
+                    node.estimation_log.append(f"{timestamp_str} - Tracking error: ±{node.metrics['kalman_error']:.1f}m (Kalman)")
+            else:
+                # Fallback to weighted centroid if optimization fails
+                node.estimation_log.append(f"{timestamp_str} - Optimization failed, using weighted centroid")
+                node.estimated_position = (init_lat, init_lon)
+                node.metrics['rmse_error'] = None
             
             # Keep only last 10 log entries
             if len(node.estimation_log) > 10:
@@ -651,6 +934,148 @@ class MeshTracker:
             node.estimation_log.append(f"{timestamp_str} - ⚠️ Estimation error: {str(e)}")
             if len(node.estimation_log) > 10:
                 node.estimation_log = node.estimation_log[-10:]
+            import traceback
+            self.debug_log(f"Estimation error: {traceback.format_exc()}")
+    
+    def generate_terminal_heatmap(self, node: MeshNode, grid_size: Tuple[int, int] = (20, 10)):
+        """
+        Generate terminal-based heatmap of RSSI samples
+        Uses ANSI colors (green=weak to red=strong)
+        """
+        try:
+            if len(node.estimation_samples) < 10:
+                self.console.print(f"[yellow]Not enough samples for heatmap ({len(node.estimation_samples)}/10 minimum)[/yellow]")
+                return
+            
+            # Get all valid samples
+            samples = node.estimation_samples
+            
+            # Extract lat/lon/rssi
+            lats = np.array([s['gps_lat'] for s in samples])
+            lons = np.array([s['gps_lon'] for s in samples])
+            rssis = np.array([s['rssi'] for s in samples])
+            
+            # Calculate mean position for reference
+            mean_lat = np.mean(lats)
+            mean_lon = np.mean(lons)
+            
+            # Convert to relative x,y meters using flat-earth approximation
+            # (Good enough for small areas)
+            R = 6371000  # Earth radius in meters
+            lat_to_m = R * np.pi / 180
+            lon_to_m = R * np.pi / 180 * np.cos(np.radians(mean_lat))
+            
+            x = (lons - mean_lon) * lon_to_m
+            y = (lats - mean_lat) * lat_to_m
+            
+            # Auto-scale: Find min/max x,y
+            x_min, x_max = np.min(x), np.max(x)
+            y_min, y_max = np.min(y), np.max(y)
+            
+            # Add padding
+            x_range = x_max - x_min
+            y_range = y_max - y_min
+            if x_range < 10:  # Minimum 10m range
+                x_min -= 5
+                x_max += 5
+                x_range = 10
+            if y_range < 10:
+                y_min -= 5
+                y_max += 5
+                y_range = 10
+            
+            x_min -= x_range * 0.1
+            x_max += x_range * 0.1
+            y_min -= y_range * 0.1
+            y_max += y_range * 0.1
+            
+            # Create grid
+            grid_width, grid_height = grid_size
+            x_edges = np.linspace(x_min, x_max, grid_width + 1)
+            y_edges = np.linspace(y_min, y_max, grid_height + 1)
+            
+            # Bin samples into grid and compute average RSSI per cell
+            grid_rssi = np.full((grid_height, grid_width), np.nan)
+            grid_counts = np.zeros((grid_height, grid_width))
+            
+            for i in range(len(x)):
+                # Find which cell this sample belongs to
+                x_idx = np.searchsorted(x_edges, x[i]) - 1
+                y_idx = np.searchsorted(y_edges, y[i]) - 1
+                
+                # Bounds check
+                if 0 <= x_idx < grid_width and 0 <= y_idx < grid_height:
+                    if np.isnan(grid_rssi[y_idx, x_idx]):
+                        grid_rssi[y_idx, x_idx] = rssis[i]
+                        grid_counts[y_idx, x_idx] = 1
+                    else:
+                        grid_rssi[y_idx, x_idx] += rssis[i]
+                        grid_counts[y_idx, x_idx] += 1
+            
+            # Average RSSI in each cell
+            for y_idx in range(grid_height):
+                for x_idx in range(grid_width):
+                    if grid_counts[y_idx, x_idx] > 0:
+                        grid_rssi[y_idx, x_idx] /= grid_counts[y_idx, x_idx]
+            
+            # Normalize RSSI for coloring
+            valid_rssis = grid_rssi[~np.isnan(grid_rssi)]
+            if len(valid_rssis) == 0:
+                self.console.print("[yellow]No valid data for heatmap[/yellow]")
+                return
+            
+            rssi_min, rssi_max = np.min(valid_rssis), np.max(valid_rssis)
+            if rssi_min == rssi_max:
+                rssi_max = rssi_min + 1
+            
+            # Clear screen and print heatmap
+            self.console.print("\\n" + "="*80)
+            self.console.print(f"[bold cyan]RSSI Heatmap for {node.short_name} ({node.node_id})[/bold cyan]")
+            self.console.print(f"Grid: {grid_width}x{grid_height}, Samples: {len(samples)}, Range: {x_range:.1f}m x {y_range:.1f}m")
+            self.console.print("="*80 + "\\n")
+            
+            # Print grid (top to bottom)
+            for y_idx in reversed(range(grid_height)):
+                row_str = ""
+                for x_idx in range(grid_width):
+                    if np.isnan(grid_rssi[y_idx, x_idx]):
+                        # Empty cell
+                        row_str += " "
+                    else:
+                        # Normalize RSSI to [0, 1]
+                        norm_rssi = (grid_rssi[y_idx, x_idx] - rssi_min) / (rssi_max - rssi_min)
+                        
+                        # Map to green (weak) -> red (strong)
+                        # norm_rssi: 0 = green, 1 = red
+                        r = int(255 * norm_rssi)
+                        g = int(255 * (1 - norm_rssi))
+                        b = 0
+                        
+                        # ANSI color code
+                        color_code = f"\\x1b[38;2;{r};{g};{b}m"
+                        reset_code = "\\x1b[0m"
+                        row_str += f"{color_code}█{reset_code}"
+                
+                self.console.print(row_str)
+            
+            # Print legend
+            self.console.print("\\n" + "="*80)
+            self.console.print(f"[green]Weak ({rssi_min:.1f} dBm)[/green] ← → [red]Strong ({rssi_max:.1f} dBm)[/red]")
+            
+            # Overlay estimated position if available
+            if node.estimated_position:
+                est_lat, est_lon = node.estimated_position
+                est_x = (est_lon - mean_lon) * lon_to_m
+                est_y = (est_lat - mean_lat) * lat_to_m
+                self.console.print(f"[bold white]Estimated Position: X={est_x:.1f}m, Y={est_y:.1f}m (marked as X in white)[/bold white]")
+            
+            self.console.print("="*80 + "\\n")
+            self.console.print("[dim]Press any key to return...[/dim]")
+            
+        except Exception as e:
+            self.console.print(f"[red]Error generating heatmap: {e}[/red]")
+            import traceback
+            self.debug_log(f"Heatmap error: {traceback.format_exc()}")
     
     def save_last_selected_node(self):
         """Save the last selected node ID to file"""
@@ -886,12 +1311,12 @@ class MeshTracker:
         bearing = None
         compass = None
         
-        # ONLY use estimated position for navigation, NOT last known GPS
-        node_lat = None
-        node_lon = None
-        position_type = None
+        # Use GPS position if available, otherwise use estimated position
+        node_lat = node.latitude
+        node_lon = node.longitude
+        position_type = "GPS"
         
-        if node.estimated_position:
+        if node_lat is None and node.estimated_position:
             node_lat, node_lon = node.estimated_position
             position_type = "ESTIMATED"
         
@@ -1069,7 +1494,7 @@ class MeshTracker:
                 
                 est_position_table.add_row(Text(f"Confidence: {'Medium' if len(node.estimation_samples) >= 10 else 'Low'} ({len(node.estimation_samples)} RSSI samples)", style="dim yellow"))
             else:
-                est_position_table.add_row(Text(f"⏳ Calculating... ({len(node.estimation_samples)} samples collected)", style="yellow"))
+                est_position_table.add_row(Text(f"⏳ Collecting data... ({len(node.estimation_samples)}/3 samples minimum)", style="yellow"))
             
             est_position_table.add_row(Text("", style="dim"))  # Spacer
             
@@ -1079,25 +1504,60 @@ class MeshTracker:
                 for log_entry in node.estimation_log[-5:]:
                     est_position_table.add_row(Text(f"  {log_entry}", style="dim white"))
             else:
-                est_position_table.add_row(Text("Collecting RSSI data for estimation...", style="dim white"))
+                est_position_table.add_row(Text("Waiting for node to transmit more packets...", style="dim white"))
+                est_position_table.add_row(Text("(Need 3 packets with RSSI data)", style="dim yellow"))
         else:
             # No samples yet
             est_position_table.add_row(Text("🎯 Position Estimation Initializing", style="bold cyan"))
             est_position_table.add_row(Text(f"Status: Waiting for RSSI data (0/3 minimum)", style="yellow"))
             est_position_table.add_row(Text("", style="dim"))
             if self.gps_data.fix:
-                est_position_table.add_row(Text("Algorithm: Weighted RSSI triangulation", style="dim white"))
-                est_position_table.add_row(Text("Waiting for node to transmit packets...", style="dim white"))
+                est_position_table.add_row(Text("Algorithm: RSSI Trilateration", style="dim white"))
+                est_position_table.add_row(Text("How it works:", style="cyan"))
+                est_position_table.add_row(Text("  1. Move to different locations while tracking", style="dim white"))
+                est_position_table.add_row(Text("  2. RSSI converts to distance circles", style="dim white"))
+                est_position_table.add_row(Text("  3. Circles intersect at target location", style="dim white"))
+                est_position_table.add_row(Text("Waiting for node to transmit packets...", style="dim yellow"))
             else:
                 est_position_table.add_row(Text("⚠️  GPS fix required on Pi to start estimation", style="bold red"))
         
         est_position_panel = Panel(est_position_table, title="🎯 Estimated Position & Algorithm", border_style="magenta", box=box.ROUNDED)
         
+        # Metrics Panel - Show real-time estimation metrics
+        metrics_table = Table(show_header=False, box=box.SIMPLE, padding=(0, 1))
+        metrics_table.add_column("Key", style="cyan", width=25)
+        metrics_table.add_column("Value", style="white", width=30)
+        
+        if node.metrics['num_samples'] > 0:
+            if node.metrics.get('total_samples'):
+                metrics_table.add_row("Total Samples Collected", str(node.metrics['total_samples']))
+            metrics_table.add_row("Valid Samples Used", str(node.metrics['num_samples']))
+            if node.metrics['avg_rssi'] is not None:
+                metrics_table.add_row("Avg RSSI", f"{node.metrics['avg_rssi']:.1f} dBm")
+            if node.metrics['std_rssi'] is not None:
+                metrics_table.add_row("RSSI Std Dev", f"{node.metrics['std_rssi']:.1f} dBm")
+            if node.metrics['rmse_error'] is not None:
+                metrics_table.add_row("Est. Error (RMSE)", f"±{node.metrics['rmse_error']:.1f} m")
+            if node.metrics['bearing_spread'] is not None:
+                metrics_table.add_row("Sample Diversity", f"{node.metrics['bearing_spread']:.1f}°")
+            if node.metrics['avg_sample_age'] is not None:
+                age_min = node.metrics['avg_sample_age'] / 60
+                metrics_table.add_row("Avg Sample Age", f"{age_min:.1f} min")
+            if node.metrics['motion_detected']:
+                metrics_table.add_row("Motion Status", Text("⚠️  Motion Detected", style="bold yellow"))
+            if node.metrics['kalman_error'] is not None:
+                metrics_table.add_row("Tracking Error", f"±{node.metrics['kalman_error']:.1f} m")
+        else:
+            metrics_table.add_row("Status", Text("Collecting samples...", style="dim yellow"))
+        
+        metrics_panel = Panel(metrics_table, title="📊 Estimation Metrics", border_style="cyan", box=box.ROUNDED)
+        
         # Distance & Compass panel (right side)
         distance_table = Table(show_header=False, box=box.SIMPLE, padding=(0, 1))
         distance_table.add_column("Info", style="white", width=30)
         
-        if distance is not None and bearing is not None and compass is not None:
+        # Only show navigation data if we have a position estimate
+        if node.estimated_position and distance is not None and bearing is not None and compass is not None:
             distance_table.add_row(Text("📏 DISTANCE", style="bold cyan"))
             distance_table.add_row(Text(format_distance(distance), style="bold green"))
             distance_table.add_row(Text("", style="dim"))
@@ -1107,23 +1567,25 @@ class MeshTracker:
             distance_table.add_row(Text("🎯 DIRECTION", style="bold cyan"))
             distance_table.add_row(Text(f"{compass}", style="bold white"))
             distance_table.add_row(Text(self.create_compass_visual(bearing), style="bold green"))
+            
+            # Add estimated position info
             distance_table.add_row(Text("", style="dim"))
             distance_table.add_row(Text("📍 FROM", style="bold magenta"))
-            distance_table.add_row(Text("Estimated Pos.", style="dim yellow"))
+            if position_type == "ESTIMATED":
+                distance_table.add_row(Text("Estimated Pos.", style="dim yellow"))
+            else:
+                distance_table.add_row(Text("GPS Position", style="dim cyan"))
         else:
-            distance_table.add_row(Text("⚠️  No Current", style="bold yellow"))
-            distance_table.add_row(Text("Estimate", style="bold yellow"))
+            # No navigation data until first position estimate
+            distance_table.add_row(Text("⏳ Awaiting Position", style="yellow"))
             distance_table.add_row(Text("", style="dim"))
-            distance_table.add_row(Text("Navigation requires", style="dim white"))
-            distance_table.add_row(Text("estimated position", style="dim white"))
-            distance_table.add_row(Text("", style="dim"))
-            if not self.gps_data.fix:
-                distance_table.add_row(Text("⚠️  Need GPS fix", style="red"))
-                distance_table.add_row(Text("on Pi first", style="dim red"))
-            elif not node.estimated_position:
-                distance_table.add_row(Text("Waiting for RSSI", style="dim white"))
-                distance_table.add_row(Text("samples to build", style="dim white"))
+            if not node.estimated_position:
+                distance_table.add_row(Text("Waiting for first", style="dim white"))
                 distance_table.add_row(Text("position estimate", style="dim white"))
+            elif not self.gps_data.fix:
+                distance_table.add_row(Text("Need GPS fix", style="dim white"))
+            elif not (node_lat and node_lon):
+                distance_table.add_row(Text("Need node position", style="dim white"))
         
         distance_panel = Panel(distance_table, title="📍 Navigation", border_style="green", box=box.ROUNDED)
         
@@ -1151,7 +1613,9 @@ class MeshTracker:
         instructions.append("📍 ", style="bold cyan")
         instructions.append("Press ", style="white")
         instructions.append("B", style="bold yellow on blue")
-        instructions.append(" to go BACK to node list  |  Press ", style="white")
+        instructions.append(" to go BACK  |  ", style="white")
+        instructions.append("H", style="bold yellow on magenta")
+        instructions.append(" for Heatmap  |  ", style="white")
         instructions.append("Q", style="bold yellow on red")
         instructions.append(" to QUIT", style="white")
         
@@ -1164,12 +1628,13 @@ class MeshTracker:
             Layout(distance_panel, ratio=1)
         )
         
-        # Layout with estimated position panel always visible
+        # Layout with estimated position panel and metrics panel always visible
         layout.split_column(
             Layout(header, size=3),
             Layout(info_panel, size=9),
             Layout(detail_panel, size=9),
             Layout(estimation_row, size=10),
+            Layout(metrics_panel, size=8),
             Layout(gps_panel, size=7),
             Layout(instr_panel, size=3)
         )
@@ -1300,6 +1765,17 @@ class MeshTracker:
                                 elif key.lower() == 'b' and self.mode == "track":
                                     self.mode = "list"
                                     self.selected_node = None
+                                elif key.lower() == 'h' and self.mode == "track" and self.selected_node:
+                                    # Generate heatmap for current tracked node
+                                    node = self.nodes.get(self.selected_node)
+                                    if node:
+                                        # Temporarily exit live display
+                                        live.stop()
+                                        self.generate_terminal_heatmap(node, self.heatmap_grid)
+                                        # Wait for user input
+                                        sys.stdin.read(1)
+                                        # Resume live display
+                                        live.start()
                                 elif key.isdigit() and self.mode == "list":
                                     # Select node by number
                                     idx = int(key) - 1
@@ -1355,8 +1831,56 @@ def main():
         action='store_true',
         help='Enable debug logging and screen capture'
     )
+    parser.add_argument(
+        '--path-loss',
+        type=float,
+        default=2.5,
+        help='Path loss exponent (2=free space, 2.5=outdoor, 3-4=urban, default: 2.5)'
+    )
+    parser.add_argument(
+        '--tx-power',
+        type=float,
+        default=14.0,
+        help='Transmit power in dBm (default: 14.0 for US Meshtastic)'
+    )
+    parser.add_argument(
+        '--freq',
+        type=float,
+        default=915.0,
+        help='Frequency in MHz (default: 915.0 for US, 868.0 for EU)'
+    )
+    parser.add_argument(
+        '--max-samples',
+        type=int,
+        default=None,
+        help='Maximum samples to use for estimation (default: all samples)'
+    )
+    parser.add_argument(
+        '--time-decay',
+        type=float,
+        default=300.0,
+        help='Time decay constant in seconds for sample weighting (default: 300.0 = 5 minutes)'
+    )
+    parser.add_argument(
+        '--heatmap-grid',
+        type=str,
+        default='20x10',
+        help='Heatmap grid size as WIDTHxHEIGHT (default: 20x10)'
+    )
+    parser.add_argument(
+        '--auto-heatmap',
+        action='store_true',
+        help='Automatically show heatmap on updates (default: manual with H key)'
+    )
     
     args = parser.parse_args()
+    
+    # Parse heatmap grid
+    try:
+        grid_parts = args.heatmap_grid.split('x')
+        heatmap_grid = (int(grid_parts[0]), int(grid_parts[1]))
+    except:
+        heatmap_grid = (20, 10)
     
     console = Console()
     console.clear()
@@ -1364,7 +1888,18 @@ def main():
     if args.debug:
         console.print("[yellow]Debug mode enabled[/yellow]")
     
-    tracker = MeshTracker(gps_port=args.gps_port, meshtastic_port=args.meshtastic_port, debug=args.debug)
+    tracker = MeshTracker(
+        gps_port=args.gps_port, 
+        meshtastic_port=args.meshtastic_port, 
+        debug=args.debug,
+        path_loss_exp=args.path_loss,
+        tx_power=args.tx_power,
+        freq_mhz=args.freq,
+        max_samples=args.max_samples,
+        time_decay=args.time_decay,
+        heatmap_grid=heatmap_grid,
+        auto_heatmap=args.auto_heatmap
+    )
     
     if args.debug:
         console.print(f"[yellow]Debug log: {tracker.debug_log_file}[/yellow]")
