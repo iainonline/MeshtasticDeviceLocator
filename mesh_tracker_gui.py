@@ -760,19 +760,27 @@ class MeshTrackerGUI:
         # Left panel - Node list
         left_frame = ttk.LabelFrame(main_frame, text="Mesh Nodes", padding=10)
         left_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=False, padx=(0, 5))
-        left_frame.config(width=250)
+        left_frame.config(width=300)
         
-        # Node list with scrollbar (extends to bottom)
+        # Node list with scrollbars (extends to bottom)
         list_frame = ttk.Frame(left_frame)
         list_frame.pack(fill=tk.BOTH, expand=True)
         
-        scrollbar = ttk.Scrollbar(list_frame)
-        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        # Vertical scrollbar
+        v_scrollbar = ttk.Scrollbar(list_frame, orient=tk.VERTICAL)
+        v_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
         
-        self.node_listbox = tk.Listbox(list_frame, yscrollcommand=scrollbar.set,
+        # Horizontal scrollbar
+        h_scrollbar = ttk.Scrollbar(list_frame, orient=tk.HORIZONTAL)
+        h_scrollbar.pack(side=tk.BOTTOM, fill=tk.X)
+        
+        self.node_listbox = tk.Listbox(list_frame, 
+                                        yscrollcommand=v_scrollbar.set,
+                                        xscrollcommand=h_scrollbar.set,
                                         font=('Courier', 9))
         self.node_listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        scrollbar.config(command=self.node_listbox.yview)
+        v_scrollbar.config(command=self.node_listbox.yview)
+        h_scrollbar.config(command=self.node_listbox.xview)
         
         self.node_listbox.bind('<<ListboxSelect>>', self.on_node_select)
         
@@ -794,7 +802,7 @@ class MeshTrackerGUI:
         info_frame = ttk.LabelFrame(right_frame, text="Tracking Information", padding=10)
         info_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 5))
         
-        self.info_text = scrolledtext.ScrolledText(info_frame, height=8, 
+        self.info_text = scrolledtext.ScrolledText(info_frame, height=14, 
                                                     font=('Courier', 9),
                                                     wrap=tk.WORD)
         self.info_text.pack(fill=tk.BOTH, expand=True)
@@ -1906,15 +1914,10 @@ class MeshTrackerGUI:
                 if node.rssi is not None or (current_time - node.last_seen) < 600
             ]
             
-            # Sort by RSSI (strongest first, handling None)
-            # Put nodes with RSSI first, then nodes without RSSI sorted by last_seen
+            # Sort by last seen (most recent first)
             sorted_nodes = sorted(
                 filtered_nodes,
-                key=lambda x: (
-                    0 if x[1].rssi is not None else 1,  # Nodes with RSSI first
-                    -(x[1].rssi if x[1].rssi is not None else 0),  # Then by RSSI descending
-                    -x[1].last_seen  # Finally by most recent
-                )
+                key=lambda x: -x[1].last_seen
             )
             
             # Store for selection handler
@@ -1928,7 +1931,7 @@ class MeshTrackerGUI:
                 
                 # Use short name
                 if node.short_name != "Unknown":
-                    name = node.short_name[:12]  # Limit to 12 chars
+                    name = node.short_name[:10]  # Limit to 10 chars to make room for age
                 else:
                     name = node_id[-4:]
                 
@@ -1949,12 +1952,20 @@ class MeshTrackerGUI:
                 else:
                     rssi_str = " N/A "
                 
+                # Format age string
+                if age < 60:
+                    age_str = f"{age}s"
+                elif age < 3600:
+                    age_str = f"{age//60}m"
+                else:
+                    age_str = f"{age//3600}h"
+                
                 # Add sample indicator if collecting
                 sample_indicator = ""
                 if len(node.estimation_samples) > 0:
                     sample_indicator = f"[{len(node.estimation_samples)}]"
                 
-                display = f"{name:12s} {rssi_str:4s}dB {sample_indicator}"
+                display = f"{name:10s} {rssi_str:5s}dB {age_str:4s} {sample_indicator}"
                 self.node_listbox.insert(tk.END, display)
                 
             print(f"[DEBUG] Actually displayed {displayed_count} nodes in listbox")
@@ -2042,31 +2053,23 @@ class MeshTrackerGUI:
     def get_node_info(self, node: MeshNode) -> str:
         """Get formatted node information"""
         info = []
-        info.append("=" * 45)
         # Use short_name if long_name is Unknown, otherwise use node_id
         display_name = node.long_name
         if display_name == "Unknown":
             display_name = node.short_name if node.short_name != "Unknown" else node.node_id[-8:]
-        info.append(f"TARGET: {display_name}")
+        info.append("=" * 45)
+        info.append(f"TARGET: {display_name} ({node.node_id[-8:]})")
         info.append("=" * 45)
         info.append("")
         
+        # Position and Navigation
         if node.estimated_position:
             lat, lon = node.estimated_position
-            info.append("*** ESTIMATED POSITION ***")
-            info.append(f"Latitude:  {lat:.6f}°")
-            info.append(f"Longitude: {lon:.6f}°")
-            
-            # Add confidence indicator
             num_samples = len(node.estimation_samples)
-            if num_samples < 5:
-                confidence = "LOW (need more samples)"
-            elif num_samples < 10:
-                confidence = "MEDIUM"
-            else:
-                confidence = "HIGH"
-            info.append(f"Confidence: {confidence} ({num_samples} samples)")
-            info.append("")
+            confidence = "HIGH" if num_samples >= 10 else "MED" if num_samples >= 5 else "LOW"
+            
+            info.append(f"ESTIMATED POSITION ({confidence} confidence)")
+            info.append(f"  {lat:.6f}°, {lon:.6f}°")
             
             if self.gps_data.fix:
                 dist = calculate_distance(
@@ -2078,71 +2081,35 @@ class MeshTrackerGUI:
                     lat, lon
                 )
                 compass = bearing_to_compass(bearing)
-                
-                info.append("*** NAVIGATION ***")
-                info.append(f"Distance:  {format_distance(dist)}")
-                info.append(f"Bearing:   {bearing:.0f}° ({compass})")
-                info.append("")
-                
-            # Add improvement suggestions
-            if num_samples < 10:
-                info.append("💡 TIP: Collect more samples to improve accuracy")
-                info.append("   Move 50-100m in different directions")
-                info.append("")
+                info.append(f"  Distance: {format_distance(dist)}  Bearing: {bearing:.0f}° ({compass})")
         else:
-            info.append("*** POSITION NOT ESTIMATED ***")
             num_samples = len(node.estimation_samples)
-            info.append(f"Samples collected: {num_samples}/3 minimum")
-            
-            if num_samples == 0:
-                info.append("")
-                info.append("📍 GETTING STARTED:")
-                info.append("  1. Ensure GPS has a fix (see GPS tab)")
-                info.append("  2. Wait for signal from this node")
-                info.append("  3. Move to a new location (50m+)")
-                info.append("  4. Wait for another signal")
-                info.append("  5. Repeat for 3+ different positions")
-            elif num_samples == 1:
-                info.append("")
-                info.append("✓ First sample collected!")
-                info.append("")
-                info.append("📍 NEXT STEPS:")
-                info.append("  • Move at least 50 meters away")
-                info.append("  • Try a different direction")
-                info.append("  • Wait for next signal from this node")
-                info.append(f"  • Need {3-num_samples} more samples minimum")
-            elif num_samples == 2:
-                info.append("")
-                info.append("✓ Two samples collected!")
-                info.append("")
-                info.append("📍 ALMOST THERE:")
-                info.append("  • Move to a 3rd different location")
-                info.append("  • Form a triangle pattern for best results")
-                info.append("  • Wait for next signal")
-                info.append("  • Position will be estimated after 3rd sample")
-            info.append("")
+            info.append(f"POSITION: Not estimated ({num_samples}/3 samples)")
         
-        info.append("Signal Quality:")
-        if node.rssi:
-            info.append(f"  RSSI: {node.rssi}dBm")
-            # Add RSSI-based distance estimate
-            if node.estimated_distance:
-                if node.estimated_distance < 1000:
-                    dist_str = f"{node.estimated_distance:.0f}m"
-                else:
-                    dist_str = f"{node.estimated_distance/1000:.1f}km"
-                info.append(f"  Est. Range: ~{dist_str} (from signal strength)")
-            # Show RSSI range if available
-            if node.rssi_min and node.rssi_max:
-                info.append(f"  RSSI Range: {node.rssi_min} to {node.rssi_max} dBm")
-        else:
-            info.append("  RSSI: N/A")
-        info.append(f"  SNR: {node.snr:.1f}dB" if node.snr else "  SNR: N/A")
-        info.append(f"  Last: {int(time.time() - node.last_seen)}s ago")
         info.append("")
         
-        # Add signal trends for different time windows
-        info.append("Signal Trends (Hotter/Colder):")
+        # Current Signal
+        info.append("CURRENT SIGNAL")
+        if node.rssi:
+            rssi_str = f"RSSI: {node.rssi}dBm"
+            if node.estimated_distance:
+                if node.estimated_distance < 1000:
+                    rssi_str += f"  Est.Range: {node.estimated_distance:.0f}m"
+                else:
+                    rssi_str += f"  Est.Range: {node.estimated_distance/1000:.1f}km"
+            info.append(f"  {rssi_str}")
+            if node.snr:
+                info.append(f"  SNR: {node.snr:.1f}dB  Last: {int(time.time() - node.last_seen)}s ago")
+            else:
+                info.append(f"  Last: {int(time.time() - node.last_seen)}s ago")
+            if node.rssi_min and node.rssi_max:
+                info.append(f"  Range: {node.rssi_min} to {node.rssi_max} dBm")
+        else:
+            info.append("  No signal data yet")
+        info.append("")
+        
+        # Signal Trends
+        info.append("SIGNAL TRENDS (Hotter/Colder)")
         trend_10s = node.get_signal_trend(10)
         trend_60s = node.get_signal_trend(60)
         trend_5m = node.get_signal_trend(300)
@@ -2151,50 +2118,44 @@ class MeshTrackerGUI:
         change_60s = node.get_signal_strength_change(60)
         change_5m = node.get_signal_strength_change(300)
         
+        trends = []
         if trend_10s:
             emoji = "🔥" if trend_10s == 'hotter' else "❄️" if trend_10s == 'colder' else "➡️"
-            change_str = f" ({change_10s:+.1f} dBm)" if change_10s else ""
-            info.append(f"  10s: {emoji} {trend_10s.upper()}{change_str}")
-        else:
-            info.append(f"  10s: (collecting data...)")
-        
+            change_str = f"{change_10s:+.1f}" if change_10s else ""
+            trends.append(f"10s:{emoji}{change_str}")
         if trend_60s:
             emoji = "🔥" if trend_60s == 'hotter' else "❄️" if trend_60s == 'colder' else "➡️"
-            change_str = f" ({change_60s:+.1f} dBm)" if change_60s else ""
-            info.append(f"  60s: {emoji} {trend_60s.upper()}{change_str}")
-        else:
-            info.append(f"  60s: (collecting data...)")
-        
+            change_str = f"{change_60s:+.1f}" if change_60s else ""
+            trends.append(f"60s:{emoji}{change_str}")
         if trend_5m:
             emoji = "🔥" if trend_5m == 'hotter' else "❄️" if trend_5m == 'colder' else "➡️"
-            change_str = f" ({change_5m:+.1f} dBm)" if change_5m else ""
-            info.append(f"  5m:  {emoji} {trend_5m.upper()}{change_str}")
-        else:
-            info.append(f"  5m:  (collecting data...)")
+            change_str = f"{change_5m:+.1f}" if change_5m else ""
+            trends.append(f"5m:{emoji}{change_str}")
         
-        # Add last 5 signal readings
+        if trends:
+            info.append(f"  {' | '.join(trends)}")
+        else:
+            info.append("  (collecting data...)")
+        
+        # Last 5 signal readings - compact format
         info.append("")
-        info.append("Last 5 Signal Readings:")
+        info.append("SIGNAL HISTORY (last 5)")
         last_readings = node.get_last_n_signal_readings(5)
         if last_readings:
             for i, reading in enumerate(last_readings, 1):
-                age_str = f"{reading['age']:.0f}s ago" if reading['age'] < 60 else f"{reading['age']/60:.1f}m ago"
-                info.append(f"  {i}. RSSI: {reading['rssi']:4d}dBm, SNR: {reading['snr']:4.1f}dB ({age_str})")
+                age_str = f"{reading['age']:.0f}s" if reading['age'] < 60 else f"{reading['age']/60:.1f}m"
+                info.append(f"  {i}. {reading['rssi']:4d}dBm  SNR:{reading['snr']:4.1f}dB  {age_str}")
         else:
             info.append("  (no readings yet)")
         
+        # Stats
         info.append("")
-        info.append(f"ID: {node.node_id}")
-        info.append(f"Samples: {len(node.estimation_samples)}")
-        info.append(f"Packets: {node.packet_count}")
-        
-        info.append("")
-        info.append("Metrics:")
-        info.append(f"  Samples: {node.metrics.get('num_samples', 0)}")
+        info.append("STATS")
+        info.append(f"  Packets: {node.packet_count}  Samples: {len(node.estimation_samples)}")
         if node.metrics.get('avg_rssi'):
-            info.append(f"  Avg RSSI: {node.metrics['avg_rssi']:.1f}dBm")
-        if node.metrics.get('std_rssi'):
-            info.append(f"  RSSI Std: {node.metrics['std_rssi']:.1f}dBm")
+            avg_rssi = node.metrics['avg_rssi']
+            std_rssi = node.metrics.get('std_rssi', 0)
+            info.append(f"  Avg RSSI: {avg_rssi:.1f}dBm  Std: {std_rssi:.1f}dB")
         
         return '\n'.join(info)
         
