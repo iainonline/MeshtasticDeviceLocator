@@ -582,13 +582,13 @@ class MeshTrackerGUI:
     """Main GUI application"""
     
     def __init__(self, root, gps_port=2947, meshtastic_port=None, 
-                 path_loss_exp=2.5, tx_power=14.0, freq_mhz=915.0):
+                 path_loss_exp=2.5, tx_power=14.0, freq_mhz=915.0, enable_logging=False):
         self.root = root
         self.root.title("Meshtastic Node Tracker")
         
         # Set reasonable window size (fits most screens)
-        window_width = 1000
-        window_height = 650
+        window_width = 900
+        window_height = 600
         
         # Center the window on screen
         screen_width = root.winfo_screenwidth()
@@ -598,6 +598,14 @@ class MeshTrackerGUI:
         
         self.root.geometry(f"{window_width}x{window_height}+{x}+{y}")
         self.root.minsize(800, 500)  # Set minimum size
+        
+        self.enable_logging = enable_logging
+        self.log_file = None
+        if self.enable_logging:
+            from datetime import datetime
+            log_filename = datetime.now().strftime("mesh_tracker_%Y%m%d_%H%M%S.jsonl")
+            self.log_file = open(log_filename, 'w')
+            print(f"[DEBUG] Logging enabled to {log_filename}")
         
         self.gps_port = gps_port
         self.meshtastic_port = meshtastic_port
@@ -616,6 +624,10 @@ class MeshTrackerGUI:
         # Map markers
         self.tracker_marker = None
         self.target_marker = None
+        self.node_markers = {}  # Dictionary to track markers for all nodes
+        self.node_marker_positions = {}  # Track last position of each marker to avoid unnecessary updates
+        self.node_distances = {}  # Track distance to each node for alerts
+        self.node_distance_history = {}  # Track distance over time for trend analysis
         self.last_marker_position = None  # Track last marker position to reduce flicker
         self.last_gps_position = None  # Track last valid GPS position for when fix is lost
         
@@ -645,18 +657,18 @@ class MeshTrackerGUI:
         
         # Left panel - Node list
         left_frame = ttk.LabelFrame(main_frame, text="Mesh Nodes", padding=10)
-        left_frame.pack(side=tk.LEFT, fill=tk.Y, expand=False, padx=(0, 5))
-        left_frame.config(width=300)
+        left_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=False, padx=(0, 5))
+        left_frame.config(width=250)
         
-        # Node list with scrollbar (limited to 5 lines)
+        # Node list with scrollbar (extends to bottom)
         list_frame = ttk.Frame(left_frame)
-        list_frame.pack(fill=tk.BOTH, expand=False)
+        list_frame.pack(fill=tk.BOTH, expand=True)
         
         scrollbar = ttk.Scrollbar(list_frame)
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
         
         self.node_listbox = tk.Listbox(list_frame, yscrollcommand=scrollbar.set,
-                                        font=('Courier', 10), height=5)
+                                        font=('Courier', 9))
         self.node_listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         scrollbar.config(command=self.node_listbox.yview)
         
@@ -667,7 +679,10 @@ class MeshTrackerGUI:
         test_button_frame.pack(fill=tk.X, pady=(10, 0))
         
         ttk.Button(test_button_frame, text="Test GPS Movement",
-                  command=self.open_test_gps_dialog).pack(fill=tk.X)
+                  command=self.open_test_gps_dialog).pack(fill=tk.X, pady=(0, 5))
+        
+        ttk.Button(test_button_frame, text="Ping Selected Node",
+                  command=self.ping_selected_node).pack(fill=tk.X)
         
         # Right panel - Tracking view
         right_frame = ttk.Frame(main_frame)
@@ -711,8 +726,11 @@ class MeshTrackerGUI:
         self.calc_text.pack(fill=tk.BOTH, expand=True)
         
         # Right side of bottom: Square map (fixed size)
-        map_frame = ttk.LabelFrame(bottom_frame, text="Map View", padding=5)
-        map_frame.pack(side=tk.RIGHT, fill=tk.NONE, expand=False)
+        map_container = ttk.Frame(bottom_frame)
+        map_container.pack(side=tk.RIGHT, fill=tk.NONE, expand=False)
+        
+        map_frame = ttk.LabelFrame(map_container, text="Map View", padding=5)
+        map_frame.pack(fill=tk.BOTH, expand=True)
         
         # Create map widget with fixed square dimensions
         self.map_widget = tkintermapview.TkinterMapView(map_frame, width=400, height=400, corner_radius=0)
@@ -721,6 +739,15 @@ class MeshTrackerGUI:
         # Set default position (will be updated with GPS)
         self.map_widget.set_position(37.7749, -122.4194)
         self.map_widget.set_zoom(15)
+        
+        # Map controls below map
+        map_controls = ttk.Frame(map_container)
+        map_controls.pack(fill=tk.X, pady=(5, 0))
+        
+        ttk.Button(map_controls, text="Fit All Nodes",
+                  command=self.fit_all_nodes).pack(side=tk.LEFT, padx=2)
+        ttk.Button(map_controls, text="Center on Me",
+                  command=self.center_on_tracker).pack(side=tk.LEFT, padx=2)
         
         # Bottom: Status bar
         status_frame = ttk.Frame(right_frame)
@@ -820,6 +847,27 @@ class MeshTrackerGUI:
                                 pass
                                 
                             print(f"[DEBUG] GPS Fix: {lat:.6f}, {lon:.6f}, Sats: {parts[7]}")
+                            
+                            # Log GPS position after parsing (only GGA for complete data)
+                            if self.enable_logging and self.log_file:
+                                from datetime import datetime
+                                log_entry = {
+                                    'timestamp': datetime.now().isoformat(),
+                                    'type': 'gps',
+                                    'data': {
+                                        'raw': sentence,
+                                        'type': sentence_type,
+                                        'satellites': self.gps_data.satellites,
+                                        'timestamp': datetime.now().isoformat()
+                                    },
+                                    'gps_position': {
+                                        'latitude': self.gps_data.latitude,
+                                        'longitude': self.gps_data.longitude,
+                                        'altitude': self.gps_data.altitude
+                                    }
+                                }
+                                self.log_file.write(json.dumps(log_entry) + '\n')
+                                self.log_file.flush()
             
             # RMC - Recommended minimum
             elif sentence_type == '$GPRMC' or sentence_type == '$GNRMC':
@@ -1085,8 +1133,13 @@ class MeshTrackerGUI:
             self._test_node_location = dialog.result['test_node_location']
             readings = dialog.result['readings']
             
+            print(f"[TEST] === Adding {len(readings)} test readings ===")
+            print(f"[TEST] Target node: {self.selected_node}")
+            print(f"[TEST] Test node location: {self._test_node_location[0]:.6f}, {self._test_node_location[1]:.6f}")
+            
             # Add readings to selected node
-            for reading in readings:
+            for i, reading in enumerate(readings):
+                print(f"[TEST] Reading {i+1}: GPS({reading['gps_lat']:.6f}, {reading['gps_lon']:.6f}), RSSI:{reading['rssi']}dBm")
                 node.estimation_samples.append(reading)
             
             sample_count = len(readings)
@@ -1172,6 +1225,33 @@ class MeshTrackerGUI:
             
             node = self.nodes[node_id]
             
+            # Log packet if logging enabled
+            if self.enable_logging and self.log_file:
+                try:
+                    from datetime import datetime
+                    log_entry = {
+                        'timestamp': datetime.now().isoformat(),
+                        'type': 'mesh',
+                        'data': {
+                            'from': node_id,
+                            'fromId': node_id,
+                            'decoded': packet.get('decoded', {}),
+                            'user': {
+                                'shortName': node.short_name,
+                                'longName': node.long_name
+                            }
+                        },
+                        'gps_position': {
+                            'latitude': self.gps_data.latitude,
+                            'longitude': self.gps_data.longitude,
+                            'altitude': self.gps_data.altitude
+                        } if self.gps_data.fix else None
+                    }
+                    self.log_file.write(json.dumps(log_entry) + '\n')
+                    self.log_file.flush()
+                except Exception as log_error:
+                    print(f"[ERROR] Logging failed: {log_error}")
+            
             # Update node name from mesh_interface if available
             if self.mesh_interface and hasattr(self.mesh_interface, 'nodes'):
                 if node_id in self.mesh_interface.nodes:
@@ -1218,11 +1298,44 @@ class MeshTrackerGUI:
             node_name = node.short_name if node.short_name != "Unknown" else node_id[-4:]
             self.log_traffic(f"RX: {node_name}{rssi_str}")
             
+            # Log packet if logging enabled
+            if self.enable_logging and self.log_file:
+                try:
+                    from datetime import datetime
+                    log_entry = {
+                        'timestamp': datetime.now().isoformat(),
+                        'type': 'mesh',
+                        'data': {
+                            'from': node_id,
+                            'fromId': node_id,
+                            'decoded': packet.get('decoded', {}),
+                            'rssi': node.rssi,
+                            'snr': node.snr,
+                            'user': {
+                                'shortName': node.short_name,
+                                'longName': node.long_name
+                            }
+                        },
+                        'gps_position': {
+                            'latitude': self.gps_data.latitude,
+                            'longitude': self.gps_data.longitude,
+                            'altitude': self.gps_data.altitude
+                        } if self.gps_data.fix else None
+                    }
+                    self.log_file.write(json.dumps(log_entry) + '\n')
+                    self.log_file.flush()
+                except Exception as log_error:
+                    print(f"[ERROR] Logging failed: {log_error}")
+            
             # Update node info
             node.update(packet, self.gps_data)
             
             # If node has its own GPS position, use it directly
             if node.latitude is not None and node.longitude is not None:
+                print(f"[POSITION] Node {node_id} has GPS: lat={node.latitude:.6f}, lon={node.longitude:.6f}")
+                print(f"[POSITION] Source: Node's own GPS (not estimated)")
+                print(f"[POSITION] Current estimation_samples count: {len(node.estimation_samples)}")
+                
                 node.estimated_position = (node.latitude, node.longitude)
                 # Calculate distance if we have base station GPS
                 if self.gps_data.fix:
@@ -1235,11 +1348,16 @@ class MeshTrackerGUI:
                         distance_str = f"{distance:.0f}m"
                     else:
                         distance_str = f"{distance_km:.2f}km"
-                    self.log_calc(f"{node_name}: Position {node.latitude:.6f}, {node.longitude:.6f} - Distance: {distance_str}")
+                    print(f"[POSITION] Distance from tracker: {distance_str}")
+                    self.log_calc(f"{node_name}: [GPS DATA] Position {node.latitude:.6f}, {node.longitude:.6f} - Distance: {distance_str}")
                 else:
-                    self.log_calc(f"{node_name}: Using node's GPS position: {node.latitude:.6f}, {node.longitude:.6f}")
+                    self.log_calc(f"{node_name}: [GPS DATA] Using node's GPS position: {node.latitude:.6f}, {node.longitude:.6f}")
             # Otherwise collect RSSI samples for position estimation (requires moving base station)
             elif node.rssi and self.gps_data.fix:
+                print(f"[SAMPLE] Collecting sample for {node_id}")
+                print(f"[SAMPLE] GPS: {self.gps_data.latitude:.6f}, {self.gps_data.longitude:.6f}")
+                print(f"[SAMPLE] RSSI: {node.rssi}dBm, SNR: {node.snr if node.snr else 0}dB")
+                
                 sample = {
                     'gps_lat': self.gps_data.latitude,
                     'gps_lon': self.gps_data.longitude,
@@ -1249,6 +1367,7 @@ class MeshTrackerGUI:
                 }
                 node.estimation_samples.append(sample)
                 sample_count = len(node.estimation_samples)
+                print(f"[SAMPLE] Total samples for {node_id}: {sample_count}")
                 print(f"[DEBUG] Sample collected for {node_id}, total: {sample_count}")
                 
                 # Visual progress indicator
@@ -1286,7 +1405,18 @@ class MeshTrackerGUI:
             samples = node.estimation_samples[-100:]  # Use recent samples
             node_name = node.short_name if node.short_name != "Unknown" else node.node_id[-4:]
             
-            self.log_calc(f"{node_name}: Processing {len(samples)} samples for trilateration...")
+            print(f"[ESTIMATION] === Starting position estimation for {node.node_id} ===")
+            print(f"[ESTIMATION] Node name: {node_name}")
+            print(f"[ESTIMATION] Total samples available: {len(node.estimation_samples)}")
+            print(f"[ESTIMATION] Using recent samples: {len(samples)}")
+            
+            self.log_calc(f"{node_name}: [TRILATERATION] Processing {len(samples)} samples...")
+            
+            # Log all samples being used
+            for i, s in enumerate(samples[:5]):  # Show first 5
+                print(f"[ESTIMATION] Sample {i+1}: GPS({s['gps_lat']:.6f}, {s['gps_lon']:.6f}), RSSI:{s['rssi']}dBm")
+            if len(samples) > 5:
+                print(f"[ESTIMATION] ... and {len(samples)-5} more samples")
             
             # Simple centroid method for now
             lats = [s['gps_lat'] for s in samples]
@@ -1295,12 +1425,16 @@ class MeshTrackerGUI:
             est_lat = np.mean(lats)
             est_lon = np.mean(lons)
             
-            self.log_calc(f"{node_name}: Initial centroid estimate: {est_lat:.6f}, {est_lon:.6f}")
+            print(f"[ESTIMATION] Centroid calculation: lat={est_lat:.6f}, lon={est_lon:.6f}")
+            self.log_calc(f"{node_name}: [TRILATERATION] Initial centroid: {est_lat:.6f}, {est_lon:.6f}")
             
             # Initialize or update Kalman filter
             if not node.kalman_initialized:
-                self.log_calc(f"{node_name}: Initializing Kalman filter...")
+                print(f"[ESTIMATION] Initializing Kalman filter for first time")
+                self.log_calc(f"{node_name}: [KALMAN] Initializing filter...")
                 node.init_kalman_filter(est_lat, est_lon, initial_uncertainty=50.0)
+            else:
+                print(f"[ESTIMATION] Updating existing Kalman filter")
             
             if node.kalman_filter:
                 node.kalman_filter.predict()
@@ -1310,12 +1444,17 @@ class MeshTrackerGUI:
                 filtered_lat = node.kalman_filter.x[0]
                 filtered_lon = node.kalman_filter.x[1]
                 
+                print(f"[ESTIMATION] Kalman filtered position: lat={filtered_lat:.6f}, lon={filtered_lon:.6f}")
+                
                 node.estimated_position = (filtered_lat, filtered_lon)
                 
                 # Calculate sample quality metrics
                 rssi_values = [s['rssi'] for s in samples]
                 avg_rssi = np.mean(rssi_values)
                 std_rssi = np.std(rssi_values)
+                
+                print(f"[ESTIMATION] RSSI statistics: avg={avg_rssi:.1f}dBm, std={std_rssi:.1f}dB")
+                print(f"[ESTIMATION] RSSI range: {min(rssi_values)} to {max(rssi_values)} dBm")
                 
                 # Determine confidence level
                 confidence = "HIGH"
@@ -1326,8 +1465,9 @@ class MeshTrackerGUI:
                 elif std_rssi > 15:
                     confidence = "MEDIUM"  # High variance in signal
                 
-                self.log_calc(f"{node_name}: Position: {filtered_lat:.6f}, {filtered_lon:.6f}")
-                self.log_calc(f"{node_name}: Confidence: {confidence} (RSSI avg:{avg_rssi:.0f}dBm, σ:{std_rssi:.1f}dB)")
+                print(f"[ESTIMATION] Confidence level: {confidence}")
+                self.log_calc(f"{node_name}: [RESULT] Position: {filtered_lat:.6f}, {filtered_lon:.6f}")
+                self.log_calc(f"{node_name}: [QUALITY] Confidence: {confidence} (samples:{len(samples)}, RSSI avg:{avg_rssi:.0f}dBm, σ:{std_rssi:.1f}dB)")
                 
                 # Calculate distance and bearing if we have GPS
                 if self.gps_data.fix:
@@ -1340,6 +1480,11 @@ class MeshTrackerGUI:
                         filtered_lat, filtered_lon
                     )
                     compass = bearing_to_compass(bearing)
+                    
+                    print(f"[ESTIMATION] Distance from tracker: {format_distance(dist)}")
+                    print(f"[ESTIMATION] Bearing: {bearing:.0f}° ({compass})")
+                    print(f"[ESTIMATION] === Estimation complete ===")
+                    
                     self.log_calc(f"{node_name}: 🎯 LOCATED! Distance: {format_distance(dist)}, Bearing: {bearing:.0f}° ({compass})")
                     
                     # Add improvement suggestions based on confidence
@@ -1411,12 +1556,25 @@ class MeshTrackerGUI:
         if self.target_marker:
             self.target_marker.delete()
         
+        # Check if node has its own GPS
+        has_own_gps = node.latitude is not None and node.longitude is not None
+        
+        # Set marker name and color based on position source
+        if has_own_gps:
+            marker_text = f"🎯 {node.short_name} from NodeGPS"
+            marker_color_circle = "yellow"
+            marker_color_outside = "orange"
+        else:
+            marker_text = f"🎯 {node.short_name}"
+            marker_color_circle = "red"
+            marker_color_outside = "darkred"
+        
         # Add new marker
         self.target_marker = self.map_widget.set_marker(
             target_lat, target_lon,
-            text=f"🎯 {node.short_name}",
-            marker_color_circle="red",
-            marker_color_outside="darkred"
+            text=marker_text,
+            marker_color_circle=marker_color_circle,
+            marker_color_outside=marker_color_outside
         )
         print(f"[DEBUG] Target marker placed at {target_lat}, {target_lon}")
         
@@ -1454,6 +1612,156 @@ class MeshTrackerGUI:
             )
             print(f"[DEBUG] Map scaled to fit tracker and target")
         
+    def update_node_markers(self):
+        """Update markers for all nodes with positions on the map"""
+        try:
+            # Get all nodes with positions (either their own GPS or estimated)
+            nodes_with_positions = {}
+            for node_id, node in self.nodes.items():
+                if node.latitude is not None and node.longitude is not None:
+                    # Node has its own GPS position
+                    nodes_with_positions[node_id] = (node.latitude, node.longitude, True)
+                elif node.estimated_position:
+                    # Node has estimated position
+                    nodes_with_positions[node_id] = (*node.estimated_position, False)
+            
+            # Remove markers for nodes that no longer have positions
+            for node_id in list(self.node_markers.keys()):
+                if node_id not in nodes_with_positions:
+                    if self.node_markers[node_id]:
+                        self.node_markers[node_id].delete()
+                    del self.node_markers[node_id]
+                    if node_id in self.node_marker_positions:
+                        del self.node_marker_positions[node_id]
+            
+            # Add or update markers for nodes with positions
+            for node_id, (lat, lon, has_gps) in nodes_with_positions.items():
+                # Skip if this is the selected node (it has its own target marker)
+                if node_id == self.selected_node:
+                    continue
+                
+                # Check if position has changed (skip update if unchanged)
+                if node_id in self.node_marker_positions:
+                    old_lat, old_lon = self.node_marker_positions[node_id]
+                    if abs(old_lat - lat) < 0.00001 and abs(old_lon - lon) < 0.00001:
+                        continue  # Position unchanged, skip update
+                    
+                node = self.nodes[node_id]
+                name = node.short_name if node.short_name != "Unknown" else node_id[-4:]
+                
+                # Different colors for GPS vs estimated
+                if has_gps:
+                    marker_color = "green"
+                    marker_outside = "darkgreen"
+                else:
+                    marker_color = "purple"
+                    marker_outside = "darkviolet"
+                
+                # Update existing marker or create new one
+                if node_id in self.node_markers:
+                    # Delete old marker and create new one (simpler than updating)
+                    self.node_markers[node_id].delete()
+                
+                self.node_markers[node_id] = self.map_widget.set_marker(
+                    lat, lon,
+                    text=name,
+                    marker_color_circle=marker_color,
+                    marker_color_outside=marker_outside
+                )
+                
+                # Store current position
+                self.node_marker_positions[node_id] = (lat, lon)
+                
+        except Exception as e:
+            print(f"[ERROR] Failed to update node markers: {e}")
+            import traceback
+            traceback.print_exc()
+    
+    def fit_all_nodes(self):
+        """Zoom map to show all nodes with positions"""
+        try:
+            positions = []
+            
+            # Add tracker position if available
+            if self.gps_data.fix:
+                positions.append((self.gps_data.latitude, self.gps_data.longitude))
+            elif self.last_gps_position:
+                positions.append(self.last_gps_position)
+            
+            # Add all node positions
+            for node_id, node in self.nodes.items():
+                if node.latitude is not None and node.longitude is not None:
+                    positions.append((node.latitude, node.longitude))
+                elif node.estimated_position:
+                    positions.append(node.estimated_position)
+            
+            if len(positions) >= 2:
+                # Calculate bounding box
+                lats = [p[0] for p in positions]
+                lons = [p[1] for p in positions]
+                
+                min_lat, max_lat = min(lats), max(lats)
+                min_lon, max_lon = min(lons), max(lons)
+                
+                # Add 10% padding
+                lat_padding = (max_lat - min_lat) * 0.1
+                lon_padding = (max_lon - min_lon) * 0.1
+                
+                self.map_widget.fit_bounding_box(
+                    (max_lat + lat_padding, min_lon - lon_padding),
+                    (min_lat - lat_padding, max_lon + lon_padding)
+                )
+                print(f"[DEBUG] Fit map to {len(positions)} positions")
+            elif len(positions) == 1:
+                # Just one position, center on it
+                self.map_widget.set_position(positions[0][0], positions[0][1])
+                self.map_widget.set_zoom(15)
+            else:
+                messagebox.showinfo("No Positions", "No node positions available to display")
+                
+        except Exception as e:
+            print(f"[ERROR] Failed to fit all nodes: {e}")
+            import traceback
+            traceback.print_exc()
+    
+    def center_on_tracker(self):
+        """Center map on tracker position"""
+        if self.gps_data.fix:
+            self.map_widget.set_position(self.gps_data.latitude, self.gps_data.longitude)
+            self.map_widget.set_zoom(15)
+        elif self.last_gps_position:
+            self.map_widget.set_position(self.last_gps_position[0], self.last_gps_position[1])
+            self.map_widget.set_zoom(15)
+        else:
+            messagebox.showwarning("No GPS Fix", "No GPS position available")
+    
+    def ping_selected_node(self):
+        """Send a position request to the selected node"""
+        if not self.selected_node:
+            messagebox.showwarning("No Node Selected", "Please select a node from the list first.")
+            return
+            
+        if not self.mesh_interface or not self.mesh_connected:
+            messagebox.showerror("Not Connected", "Meshtastic device is not connected.")
+            return
+            
+        try:
+            node = self.nodes.get(self.selected_node)
+            node_name = node.short_name if node and node.short_name != "Unknown" else self.selected_node[-4:]
+            
+            # Request position from the node
+            self.mesh_interface.sendPosition(destinationId=self.selected_node)
+            
+            self.log_traffic(f"Sent position request to {node_name}")
+            print(f"[DEBUG] Sent position request to node {self.selected_node}")
+            messagebox.showinfo("Ping Sent", f"Position request sent to {node_name}")
+            
+        except Exception as e:
+            print(f"[ERROR] Failed to ping node: {e}")
+            import traceback
+            traceback.print_exc()
+            messagebox.showerror("Ping Failed", f"Failed to send position request: {str(e)}")
+    
     def on_node_select(self, event):
         """Handle node selection from list"""
         selection = self.node_listbox.curselection()
@@ -1461,13 +1769,10 @@ class MeshTrackerGUI:
             return
             
         index = selection[0]
-        # Get nodes sorted by RSSI (same as display)
-        nodes_with_rssi = [(node_id, node) for node_id, node in self.nodes.items() if node.rssi is not None]
-        sorted_nodes = sorted(nodes_with_rssi, key=lambda x: x[1].rssi, reverse=True)
-        top_nodes = sorted_nodes[:5]
         
-        if index < len(top_nodes):
-            self.selected_node = top_nodes[index][0]
+        # Use the displayed nodes list that matches what's shown
+        if hasattr(self, 'displayed_nodes') and index < len(self.displayed_nodes):
+            self.selected_node = self.displayed_nodes[index][0]
             node = self.nodes.get(self.selected_node)
             if node:
                 print(f"[DEBUG] Node selected: {self.selected_node}, short_name={node.short_name}, long_name={node.long_name}")
@@ -1487,45 +1792,84 @@ class MeshTrackerGUI:
             # Update tracker position on map (will only update if moved >10m)
             self.update_tracker_position()
             
-            # Update node list - show top 5 by signal strength
+            # Update node list - show all nodes sorted by signal strength
             self.node_listbox.delete(0, tk.END)
             node_count = len(self.nodes)
             print(f"[DEBUG] Updating display, {node_count} nodes")
             
-            # Sort by RSSI (strongest signal first), filter out nodes without RSSI
-            nodes_with_rssi = [(node_id, node) for node_id, node in self.nodes.items() if node.rssi is not None]
-            sorted_nodes = sorted(nodes_with_rssi, key=lambda x: x[1].rssi, reverse=True)
+            # Filter to only show nodes with RSSI or seen in last 10 minutes
+            current_time = time.time()
+            filtered_nodes = [
+                (node_id, node) for node_id, node in self.nodes.items()
+                if node.rssi is not None or (current_time - node.last_seen) < 600
+            ]
             
-            # Show only top 5
-            top_nodes = sorted_nodes[:5]
+            # Sort by RSSI (strongest first, handling None)
+            # Put nodes with RSSI first, then nodes without RSSI sorted by last_seen
+            sorted_nodes = sorted(
+                filtered_nodes,
+                key=lambda x: (
+                    0 if x[1].rssi is not None else 1,  # Nodes with RSSI first
+                    -(x[1].rssi if x[1].rssi is not None else 0),  # Then by RSSI descending
+                    -x[1].last_seen  # Finally by most recent
+                )
+            )
             
-            for node_id, node in top_nodes:
+            # Store for selection handler
+            self.displayed_nodes = sorted_nodes
+            
+            print(f"[DEBUG] Displaying {len(sorted_nodes)} nodes in list")
+            displayed_count = 0
+            for node_id, node in sorted_nodes:
                 age = int(time.time() - node.last_seen)
+                displayed_count += 1
                 
-                # Use long name if available, otherwise short name
-                if node.long_name and node.long_name != "Unknown":
-                    name = node.long_name[:20]  # Truncate if too long
-                elif node.short_name != "Unknown":
-                    name = node.short_name
+                # Use short name
+                if node.short_name != "Unknown":
+                    name = node.short_name[:12]  # Limit to 12 chars
                 else:
                     name = node_id[-4:]
                 
-                # Format RSSI with distance estimate
-                rssi_str = f"{node.rssi:4d}dBm"
-                if node.estimated_distance:
-                    if node.estimated_distance < 1000:
-                        dist_str = f" ~{node.estimated_distance:.0f}m"
-                    else:
-                        dist_str = f" ~{node.estimated_distance/1000:.1f}km"
-                    rssi_str += dist_str
+                # Format RSSI with trending indicator
+                if node.rssi is not None:
+                    rssi_str = f"{node.rssi:4d}"
+                    # Add trending indicator based on signal history
+                    if len(node.signal_history) >= 3:
+                        recent_rssi = [s['rssi'] for s in node.signal_history[-3:]]
+                        if len(recent_rssi) == 3:
+                            trend = recent_rssi[2] - recent_rssi[0]
+                            if trend > 3:
+                                rssi_str += "↑"  # Improving
+                            elif trend < -3:
+                                rssi_str += "↓"  # Degrading
+                            else:
+                                rssi_str += "="  # Stable
+                else:
+                    rssi_str = " N/A "
                 
                 # Add sample indicator if collecting
                 sample_indicator = ""
                 if len(node.estimation_samples) > 0:
-                    sample_indicator = f" [{len(node.estimation_samples)}📍]"
+                    sample_indicator = f"[{len(node.estimation_samples)}]"
                 
-                display = f"{name:20s} {rssi_str:20s} {age:3d}s{sample_indicator}"
+                display = f"{name:12s} {rssi_str:4s}dB {sample_indicator}"
                 self.node_listbox.insert(tk.END, display)
+                
+            print(f"[DEBUG] Actually displayed {displayed_count} nodes in listbox")
+            
+            # Restore selection if a node was selected
+            if self.selected_node:
+                # Find the index of the selected node in the displayed list
+                for idx, (node_id, node) in enumerate(self.displayed_nodes):
+                    if node_id == self.selected_node:
+                        self.node_listbox.selection_clear(0, tk.END)
+                        self.node_listbox.selection_set(idx)
+                        self.node_listbox.see(idx)  # Scroll to make it visible
+                        print(f"[DEBUG] Restored selection to index {idx} for node {self.selected_node}")
+                        break
+            
+            # Update node markers on map
+            self.update_node_markers()
             
             # Update info panel
             if self.selected_node and self.selected_node in self.nodes:
@@ -1533,6 +1877,43 @@ class MeshTrackerGUI:
                 info = self.get_node_info(node)
                 self.info_text.delete('1.0', tk.END)
                 self.info_text.insert('1.0', info)
+                
+                # Check for distance alerts on selected node
+                if node.estimated_position and self.gps_data.fix:
+                    current_dist = calculate_distance(
+                        self.gps_data.latitude, self.gps_data.longitude,
+                        node.estimated_position[0], node.estimated_position[1]
+                    )
+                    
+                    # Track distance history for trend
+                    if self.selected_node not in self.node_distance_history:
+                        self.node_distance_history[self.selected_node] = []
+                    self.node_distance_history[self.selected_node].append((time.time(), current_dist))
+                    
+                    # Keep only last 10 measurements
+                    if len(self.node_distance_history[self.selected_node]) > 10:
+                        self.node_distance_history[self.selected_node].pop(0)
+                    
+                    # Analyze trend if we have enough data
+                    trend_msg = ""
+                    if len(self.node_distance_history[self.selected_node]) >= 5:
+                        dists = [d for t, d in self.node_distance_history[self.selected_node]]
+                        avg_change = (dists[-1] - dists[0]) / len(dists)
+                        if avg_change < -10:  # Getting closer
+                            trend_msg = " 🎯 Approaching!"
+                        elif avg_change > 10:  # Moving away
+                            trend_msg = " ⚠️ Moving away!"
+                    
+                    # Check if we're getting closer
+                    if self.selected_node in self.node_distances:
+                        prev_dist = self.node_distances[self.selected_node]
+                        if current_dist < prev_dist - 50:  # 50m closer
+                            node_name = node.short_name if node.short_name != "Unknown" else self.selected_node[-4:]
+                            self.log_calc(f"🚶 Getting closer to {node_name}: {format_distance(current_dist)}{trend_msg}")
+                            if current_dist < 100:  # Within 100m
+                                self.log_calc(f"⚠️ CLOSE! {node_name} is within {format_distance(current_dist)}")
+                    
+                    self.node_distances[self.selected_node] = current_dist
             else:
                 # Show GPS info when no node selected
                 info = self.get_gps_info()
@@ -1807,6 +2188,8 @@ def main():
                         help='Transmit power in dBm (default: 14.0)')
     parser.add_argument('--freq', type=float, default=915.0,
                         help='Frequency in MHz (default: 915.0)')
+    parser.add_argument('--log-data', action='store_true',
+                        help='Enable data logging to JSONL file')
     
     args = parser.parse_args()
     print(f"[DEBUG] GPS port: {args.gps_port}")
@@ -1814,13 +2197,16 @@ def main():
     
     root = tk.Tk()
     print("[DEBUG] Creating GUI application")
+    if args.log_data:
+        print("[DEBUG] Data logging enabled")
     app = MeshTrackerGUI(
         root,
         gps_port=args.gps_port,
         meshtastic_port=args.meshtastic_port,
         path_loss_exp=args.path_loss,
         tx_power=args.tx_power,
-        freq_mhz=args.freq
+        freq_mhz=args.freq,
+        enable_logging=args.log_data
     )
     
     def on_closing():
