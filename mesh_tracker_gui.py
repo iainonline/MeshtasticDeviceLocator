@@ -334,6 +334,227 @@ def format_distance(meters: float) -> str:
         return f"{miles:.2f}mi"
 
 
+def calculate_destination(lat: float, lon: float, distance_meters: float, bearing_degrees: float) -> Tuple[float, float]:
+    """Calculate destination GPS coordinates given starting point, distance, and bearing"""
+    R = 6371000  # Earth radius in meters
+    
+    lat_rad = math.radians(lat)
+    lon_rad = math.radians(lon)
+    bearing_rad = math.radians(bearing_degrees)
+    
+    lat2_rad = math.asin(
+        math.sin(lat_rad) * math.cos(distance_meters / R) +
+        math.cos(lat_rad) * math.sin(distance_meters / R) * math.cos(bearing_rad)
+    )
+    
+    lon2_rad = lon_rad + math.atan2(
+        math.sin(bearing_rad) * math.sin(distance_meters / R) * math.cos(lat_rad),
+        math.cos(distance_meters / R) - math.sin(lat_rad) * math.sin(lat2_rad)
+    )
+    
+    return math.degrees(lat2_rad), math.degrees(lon2_rad)
+
+
+class TestGPSDialog:
+    """Dialog for creating test GPS movement samples"""
+    def __init__(self, parent, current_gps, test_node_location=None):
+        self.parent = parent
+        self.current_gps = current_gps  # (lat, lon)
+        self.result = None
+        self.test_node_location = test_node_location
+        
+        # If no test node location, place it at current location
+        if self.test_node_location is None:
+            self.test_node_location = current_gps
+        
+        self.dialog = tk.Toplevel(parent)
+        self.dialog.title("Test GPS Movement Simulator")
+        self.dialog.geometry("700x450")
+        self.dialog.transient(parent)
+        self.dialog.grab_set()
+        
+        self._create_widgets()
+        self._populate_default_readings()
+        
+    def _create_widgets(self):
+        # Instructions
+        info_frame = ttk.Frame(self.dialog, padding=10)
+        info_frame.pack(fill=tk.X)
+        
+        ttk.Label(info_frame, text="Create simulated GPS readings for testing position estimation",
+                 font=('Arial', 10, 'bold')).pack()
+        ttk.Label(info_frame, text="Default: 3 readings at 1 mile from test node at 0°, 160°, 245°",
+                 font=('Arial', 9)).pack()
+        
+        # Node location info
+        node_frame = ttk.LabelFrame(self.dialog, text="Test Node Location", padding=10)
+        node_frame.pack(fill=tk.X, padx=10, pady=5)
+        
+        node_info = ttk.Frame(node_frame)
+        node_info.pack()
+        ttk.Label(node_info, text=f"Lat: {self.test_node_location[0]:.6f}°  "
+                                  f"Lon: {self.test_node_location[1]:.6f}°").pack()
+        
+        # Readings frame
+        readings_frame = ttk.LabelFrame(self.dialog, text="Simulated Readings", padding=10)
+        readings_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
+        
+        # Headers
+        header_frame = ttk.Frame(readings_frame)
+        header_frame.pack(fill=tk.X, pady=(0, 5))
+        ttk.Label(header_frame, text="Reading", width=8).grid(row=0, column=0, padx=2)
+        ttk.Label(header_frame, text="Latitude", width=12).grid(row=0, column=1, padx=2)
+        ttk.Label(header_frame, text="Longitude", width=12).grid(row=0, column=2, padx=2)
+        ttk.Label(header_frame, text="RSSI (dBm)", width=10).grid(row=0, column=3, padx=2)
+        ttk.Label(header_frame, text="Distance", width=10).grid(row=0, column=4, padx=2)
+        
+        # Create 3 reading rows
+        self.reading_entries = []
+        for i in range(3):
+            row_frame = ttk.Frame(readings_frame)
+            row_frame.pack(fill=tk.X, pady=2)
+            
+            ttk.Label(row_frame, text=f"#{i+1}", width=8).grid(row=0, column=0, padx=2)
+            
+            lat_entry = ttk.Entry(row_frame, width=12)
+            lat_entry.grid(row=0, column=1, padx=2)
+            
+            lon_entry = ttk.Entry(row_frame, width=12)
+            lon_entry.grid(row=0, column=2, padx=2)
+            
+            rssi_entry = ttk.Entry(row_frame, width=10)
+            rssi_entry.grid(row=0, column=3, padx=2)
+            
+            dist_label = ttk.Label(row_frame, text="", width=10)
+            dist_label.grid(row=0, column=4, padx=2)
+            
+            self.reading_entries.append({
+                'lat': lat_entry,
+                'lon': lon_entry,
+                'rssi': rssi_entry,
+                'dist_label': dist_label
+            })
+        
+        # Buttons
+        button_frame = ttk.Frame(self.dialog, padding=10)
+        button_frame.pack(fill=tk.X)
+        
+        ttk.Button(button_frame, text="Random Shift Node", 
+                  command=self._random_shift).pack(side=tk.LEFT, padx=5)
+        ttk.Button(button_frame, text="Create Readings", 
+                  command=self._create_readings).pack(side=tk.RIGHT, padx=5)
+        ttk.Button(button_frame, text="Cancel", 
+                  command=self.dialog.destroy).pack(side=tk.RIGHT, padx=5)
+        
+    def _populate_default_readings(self):
+        """Create default readings at 1 mile distance at specific bearings"""
+        mile_in_meters = 1609.34
+        bearings = [0, 160, 245]
+        
+        for i, bearing in enumerate(bearings):
+            # Calculate GPS position 1 mile from test node
+            lat, lon = calculate_destination(
+                self.test_node_location[0], 
+                self.test_node_location[1],
+                mile_in_meters,
+                bearing
+            )
+            
+            # Calculate distance from current GPS
+            dist = calculate_distance(
+                self.current_gps[0], self.current_gps[1],
+                lat, lon
+            )
+            
+            # Default RSSI at 1 mile (~50% signal, assuming -100 dBm range)
+            rssi = -95
+            
+            self.reading_entries[i]['lat'].insert(0, f"{lat:.6f}")
+            self.reading_entries[i]['lon'].insert(0, f"{lon:.6f}")
+            self.reading_entries[i]['rssi'].insert(0, str(rssi))
+            self.reading_entries[i]['dist_label'].config(text=format_distance(dist))
+    
+    def _random_shift(self):
+        """Randomly shift test node location by up to 0.5 miles and regenerate readings"""
+        import random
+        
+        # Shift node up to 0.5 miles in random direction
+        shift_distance = random.uniform(0, 804.67)  # 0-0.5 miles in meters
+        shift_bearing = random.uniform(0, 360)
+        
+        new_lat, new_lon = calculate_destination(
+            self.test_node_location[0],
+            self.test_node_location[1],
+            shift_distance,
+            shift_bearing
+        )
+        
+        self.test_node_location = (new_lat, new_lon)
+        
+        # Clear existing entries
+        for entry_set in self.reading_entries:
+            entry_set['lat'].delete(0, tk.END)
+            entry_set['lon'].delete(0, tk.END)
+            entry_set['rssi'].delete(0, tk.END)
+        
+        # Regenerate readings with adjusted RSSI based on new distances
+        mile_in_meters = 1609.34
+        bearings = [random.uniform(0, 360) for _ in range(3)]
+        
+        for i, bearing in enumerate(bearings):
+            # Random distance between 0.5 and 1.5 miles
+            reading_distance = random.uniform(804.67, 2414.01)
+            
+            lat, lon = calculate_destination(
+                self.test_node_location[0],
+                self.test_node_location[1],
+                reading_distance,
+                bearing
+            )
+            
+            dist = calculate_distance(
+                self.current_gps[0], self.current_gps[1],
+                lat, lon
+            )
+            
+            # Adjust RSSI based on distance (roughly -6dB per doubling of distance)
+            base_rssi = -90
+            distance_factor = reading_distance / mile_in_meters
+            rssi = int(base_rssi - (20 * math.log10(distance_factor)))
+            rssi = max(-120, min(-60, rssi))  # Clamp to reasonable range
+            
+            self.reading_entries[i]['lat'].insert(0, f"{lat:.6f}")
+            self.reading_entries[i]['lon'].insert(0, f"{lon:.6f}")
+            self.reading_entries[i]['rssi'].insert(0, str(rssi))
+            self.reading_entries[i]['dist_label'].config(text=format_distance(dist))
+    
+    def _create_readings(self):
+        """Collect readings and close dialog"""
+        readings = []
+        for i, entry_set in enumerate(self.reading_entries):
+            try:
+                lat = float(entry_set['lat'].get())
+                lon = float(entry_set['lon'].get())
+                rssi = int(entry_set['rssi'].get())
+                
+                readings.append({
+                    'gps_lat': lat,
+                    'gps_lon': lon,
+                    'rssi': rssi,
+                    'snr': 5.0,  # Default SNR
+                    'timestamp': time.time()
+                })
+            except ValueError as e:
+                messagebox.showerror("Invalid Input", f"Reading #{i+1} has invalid values: {e}")
+                return
+        
+        self.result = {
+            'readings': readings,
+            'test_node_location': self.test_node_location
+        }
+        self.dialog.destroy()
+
+
 class MeshTrackerGUI:
     """Main GUI application"""
     
@@ -401,22 +622,29 @@ class MeshTrackerGUI:
         
         # Left panel - Node list
         left_frame = ttk.LabelFrame(main_frame, text="Mesh Nodes", padding=10)
-        left_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=False, padx=(0, 5))
+        left_frame.pack(side=tk.LEFT, fill=tk.Y, expand=False, padx=(0, 5))
         left_frame.config(width=300)
         
-        # Node list with scrollbar
+        # Node list with scrollbar (limited to 5 lines)
         list_frame = ttk.Frame(left_frame)
-        list_frame.pack(fill=tk.BOTH, expand=True)
+        list_frame.pack(fill=tk.BOTH, expand=False)
         
         scrollbar = ttk.Scrollbar(list_frame)
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
         
         self.node_listbox = tk.Listbox(list_frame, yscrollcommand=scrollbar.set,
-                                        font=('Courier', 10))
+                                        font=('Courier', 10), height=5)
         self.node_listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         scrollbar.config(command=self.node_listbox.yview)
         
         self.node_listbox.bind('<<ListboxSelect>>', self.on_node_select)
+        
+        # Test GPS button
+        test_button_frame = ttk.Frame(left_frame)
+        test_button_frame.pack(fill=tk.X, pady=(10, 0))
+        
+        ttk.Button(test_button_frame, text="Test GPS Movement",
+                  command=self.open_test_gps_dialog).pack(fill=tk.X)
         
         # Right panel - Tracking view
         right_frame = ttk.Frame(main_frame)
@@ -788,6 +1016,59 @@ class MeshTrackerGUI:
         
         print("[DEBUG] No USB devices found")
         return False
+    
+    def open_test_gps_dialog(self):
+        """Open dialog to create test GPS movement samples"""
+        if not self.gps_data.fix:
+            messagebox.showwarning("No GPS Fix", 
+                                  "GPS must have a valid fix before creating test readings.")
+            return
+        
+        if not self.selected_node:
+            messagebox.showwarning("No Node Selected",
+                                  "Please select a node from the list first.")
+            return
+        
+        node = self.nodes.get(self.selected_node)
+        if not node:
+            return
+        
+        # Use existing test node location if available, otherwise current GPS
+        test_node_loc = getattr(self, '_test_node_location', None)
+        if test_node_loc is None:
+            test_node_loc = (self.gps_data.latitude, self.gps_data.longitude)
+        
+        dialog = TestGPSDialog(
+            self.root,
+            (self.gps_data.latitude, self.gps_data.longitude),
+            test_node_loc
+        )
+        
+        # Wait for dialog to close
+        self.root.wait_window(dialog.dialog)
+        
+        # Process results if any
+        if dialog.result:
+            self._test_node_location = dialog.result['test_node_location']
+            readings = dialog.result['readings']
+            
+            # Add readings to selected node
+            for reading in readings:
+                node.estimation_samples.append(reading)
+            
+            sample_count = len(readings)
+            node_name = node.short_name if node.short_name != "Unknown" else self.selected_node[-4:]
+            
+            self.log_calc(f"TEST: Added {sample_count} simulated readings for {node_name}")
+            self.log_calc(f"TEST: Test node at {self._test_node_location[0]:.6f}, {self._test_node_location[1]:.6f}")
+            
+            # Trigger position estimation if enough samples
+            total_samples = len(node.estimation_samples)
+            if total_samples >= 3:
+                self.log_calc(f"{node_name}: 📍 Calculating position with {total_samples} samples...")
+                self.estimate_node_position(node)
+            else:
+                self.log_calc(f"{node_name}: Need {3 - total_samples} more samples for estimation")
     
     def reconnect_usb(self):
         """Reconnect to Meshtastic USB device"""
