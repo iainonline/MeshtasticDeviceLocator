@@ -1005,14 +1005,20 @@ class MeshTrackerGUI:
         except Exception as e:
             print(f"[DEBUG] NMEA parse error: {e}")
                 
-    def connect_meshtastic(self):
-        """Connect or reconnect to Meshtastic device"""
+    def connect_meshtastic(self, retry_count=0, max_retries=3):
+        """Connect or reconnect to Meshtastic device with retry logic"""
         try:
             if meshtastic is None:
                 print("[WARNING] Meshtastic library not available")
                 return False
+            
+            # Add delay for retries (exponential backoff)
+            if retry_count > 0:
+                delay = min(2 ** retry_count, 10)  # Max 10 seconds
+                print(f"[DEBUG] Retry {retry_count}/{max_retries}, waiting {delay}s...")
+                time.sleep(delay)
                 
-            logger.info(f"Connecting to Meshtastic port: {self.meshtastic_port or 'auto-detect'}")
+            logger.info(f"Connecting to Meshtastic port: {self.meshtastic_port or 'auto-detect'} (attempt {retry_count + 1}/{max_retries + 1})")
             
             # Subscribe to packets using pubsub BEFORE creating interface
             # This must be done before the interface is created to catch all packets
@@ -1035,15 +1041,35 @@ class MeshTrackerGUI:
                 self.mesh_connected = False
                 self.local_node_name = "Not Connected"
             
-            # Attempt new connection
+            # Attempt new connection with timeout
             try:
+                print("[DEBUG] Creating Meshtastic serial interface...")
                 if self.meshtastic_port:
-                    self.mesh_interface = meshtastic.serial_interface.SerialInterface(self.meshtastic_port)
+                    self.mesh_interface = meshtastic.serial_interface.SerialInterface(
+                        self.meshtastic_port,
+                        connectNow=True
+                    )
                 else:
-                    self.mesh_interface = meshtastic.serial_interface.SerialInterface()
+                    self.mesh_interface = meshtastic.serial_interface.SerialInterface(
+                        connectNow=True
+                    )
+                print("[DEBUG] Serial interface created successfully")
             except Exception as conn_error:
                 error_str = str(conn_error)
-                print(f"[WARNING] Could not connect to Meshtastic: {error_str}")
+                print(f"[WARNING] Connection attempt failed: {error_str}")
+                
+                # Check if we should retry
+                should_retry = (
+                    retry_count < max_retries and
+                    ("Timed out" in error_str or 
+                     "readiness to read but returned no data" in error_str or
+                     "disconnected" in error_str.lower())
+                )
+                
+                if should_retry:
+                    print(f"[DEBUG] Retrying connection ({retry_count + 1}/{max_retries})...")
+                    return self.connect_meshtastic(retry_count + 1, max_retries)
+                
                 self.log_traffic(f"✗ USB connection failed: {error_str}")
                 
                 # Check for common errors
@@ -1177,7 +1203,7 @@ class MeshTrackerGUI:
             return False
     
     def check_usb_device(self):
-        """Check if USB device is available"""
+        """Check if USB device is available and not in use"""
         import glob
         import os
         
@@ -1189,14 +1215,38 @@ class MeshTrackerGUI:
             '/dev/cu.usbmodem*'     # macOS
         ]
         
+        found_devices = []
         for pattern in usb_patterns:
             devices = glob.glob(pattern)
-            if devices:
-                print(f"[DEBUG] Found USB device(s): {devices}")
-                return True
+            found_devices.extend(devices)
         
-        print("[DEBUG] No USB devices found")
-        return False
+        if not found_devices:
+            print("[DEBUG] No USB devices found")
+            return False
+        
+        print(f"[DEBUG] Found USB device(s): {found_devices}")
+        
+        # Check if device is accessible (not locked by another process)
+        for device in found_devices:
+            try:
+                # Try to check if device is accessible by checking file status
+                import subprocess
+                result = subprocess.run(['lsof', device], 
+                                      capture_output=True, 
+                                      text=True, 
+                                      timeout=1)
+                if result.returncode == 0:
+                    print(f"[WARNING] Device {device} is in use by another process:")
+                    print(result.stdout)
+                    self.log_traffic(f"WARNING: {device} in use by another process")
+                    self.log_traffic("Hint: Close other Meshtastic applications")
+            except (FileNotFoundError, subprocess.TimeoutExpired):
+                # lsof not available or timed out - not critical
+                pass
+            except Exception as e:
+                print(f"[DEBUG] Could not check device usage: {e}")
+        
+        return True
     
     def open_test_gps_dialog(self):
         """Open dialog to create test GPS movement samples"""
@@ -1267,9 +1317,9 @@ class MeshTrackerGUI:
                 self.log_calc(f"{node_name}: Need {3 - total_samples} more samples for estimation")
     
     def reconnect_usb(self):
-        """Reconnect to Meshtastic USB device"""
+        """Reconnect to Meshtastic USB device with better error handling"""
         print("[DEBUG] Reconnect USB requested")
-        self.log_traffic("Reconnecting USB...")
+        self.log_traffic("Reconnecting USB (with retries)...")
         
         # Update status bar immediately
         self.status_label.config(text="Reconnecting to USB...")
@@ -1278,23 +1328,32 @@ class MeshTrackerGUI:
         if not self.check_usb_device():
             error_msg = "No USB device found - check connection"
             self.log_traffic(error_msg)
+            self.log_traffic("Hint: Try unplugging and replugging the device")
             self.status_label.config(text=f"ERROR: {error_msg}")
             print("[WARNING] No USB device found")
             return
         
         # Run connection in separate thread to avoid blocking UI
         def reconnect_thread():
-            success = self.connect_meshtastic()
-            if success:
-                print("[DEBUG] Reconnection successful")
-                self.log_traffic(f"✓ USB connected: {self.local_node_name}")
-                # Force immediate status update
-                self.root.after(100, self.update_display)
-            else:
-                print("[DEBUG] Reconnection failed")
-                error_msg = "USB reconnection failed - check device"
-                self.log_traffic(error_msg)
-                self.status_label.config(text=f"ERROR: {error_msg}")
+            try:
+                # Try connection with retries
+                success = self.connect_meshtastic(retry_count=0, max_retries=3)
+                if success:
+                    print("[DEBUG] Reconnection successful")
+                    self.log_traffic(f"✓ USB connected: {self.local_node_name}")
+                    # Force immediate status update
+                    self.root.after(100, self.update_display)
+                else:
+                    print("[DEBUG] Reconnection failed after retries")
+                    error_msg = "USB reconnection failed after retries"
+                    self.log_traffic(error_msg)
+                    self.log_traffic("Try: 1) Unplug device 2) Wait 5s 3) Replug 4) Click Reconnect")
+                    self.status_label.config(text=f"ERROR: {error_msg}")
+            except Exception as e:
+                print(f"[ERROR] Reconnect thread exception: {e}")
+                self.log_traffic(f"Reconnection error: {e}")
+                import traceback
+                traceback.print_exc()
         
         threading.Thread(target=reconnect_thread, daemon=True).start()
     
