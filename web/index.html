@@ -1,0 +1,120 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0" />
+    <meta name="theme-color" content="#0d1117" />
+    <title>Fabled Mesh — Meshtastic Node Locator</title>
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%F0%9F%93%A1%3C/text%3E%3C/svg%3E" />
+  </head>
+  <body>
+    <div id="app">
+      <header id="topbar">
+        <div class="brand">📡 Fabled&nbsp;Mesh</div>
+        <div class="topbar-status">
+          <span id="gps-badge" class="badge off" title="Phone GPS">GPS</span>
+          <span id="radio-badge" class="badge off" title="Meshtastic device">Radio</span>
+        </div>
+        <button id="btn-connect" class="primary">Connect USB</button>
+        <button id="btn-panel" class="ghost" aria-label="Toggle panel">☰</button>
+      </header>
+
+      <main id="content">
+        <aside id="panel">
+          <section class="card" id="card-device">
+            <h2>Device</h2>
+            <div id="device-info" class="muted">
+              Not connected. Plug the Heltec V3 in via USB-C and press
+              <b>Connect USB</b>.
+            </div>
+          </section>
+
+          <section class="card" id="card-nodes">
+            <h2>Nodes <span id="node-count" class="pill">0</span></h2>
+            <input id="node-filter" type="search" placeholder="Filter nodes…" />
+            <ul id="node-list"></ul>
+          </section>
+
+          <section class="card hidden" id="card-target">
+            <h2>Target: <span id="target-name">—</span></h2>
+            <div class="statgrid">
+              <div><label>Samples</label><span id="stat-samples">0</span></div>
+              <div><label>Last RSSI</label><span id="stat-rssi">—</span></div>
+              <div><label>Last SNR</label><span id="stat-snr">—</span></div>
+              <div><label>Est. range</label><span id="stat-range">—</span></div>
+              <div><label>Uncertainty</label><span id="stat-radius">—</span></div>
+              <div><label>Bearing spread</label><span id="stat-spread">—</span></div>
+            </div>
+            <div id="hint" class="hint"></div>
+            <div class="row">
+              <label class="toggle">
+                <input type="checkbox" id="chk-ping" checked />
+                Actively ping node (traceroute every 30&nbsp;s)
+              </label>
+            </div>
+            <div class="row btnrow">
+              <button id="btn-clear" class="ghost">Reset samples</button>
+              <button id="btn-export" class="ghost">Export JSONL</button>
+              <button id="btn-stop" class="danger">Stop tracking</button>
+            </div>
+          </section>
+
+          <section class="card" id="card-settings">
+            <h2>RF model</h2>
+            <div class="settings">
+              <label>
+                Region / frequency
+                <select id="set-freq">
+                  <option value="915">915 MHz (US/ANZ)</option>
+                  <option value="868">868 MHz (EU)</option>
+                  <option value="433">433 MHz</option>
+                  <option value="920">920 MHz (JP/KR)</option>
+                </select>
+              </label>
+              <label>
+                TX power of target (dBm)
+                <input id="set-tx" type="number" value="20" min="0" max="30" />
+              </label>
+              <label>
+                Environment
+                <select id="set-env">
+                  <option value="2.2">Open / rural (n=2.2)</option>
+                  <option value="2.7" selected>Suburban (n=2.7)</option>
+                  <option value="3.2">Urban (n=3.2)</option>
+                  <option value="3.8">Dense urban / indoor (n=3.8)</option>
+                </select>
+              </label>
+            </div>
+          </section>
+
+          <section class="card" id="card-log">
+            <h2>Log</h2>
+            <div id="log"></div>
+          </section>
+        </aside>
+
+        <div id="map-wrap">
+          <div id="map"></div>
+          <div id="map-controls">
+            <button id="btn-follow" class="mapbtn active" title="Follow my position">◎</button>
+            <button id="btn-fit" class="mapbtn" title="Fit everything">⛶</button>
+          </div>
+          <div id="legend">
+            <span><i class="sw dot-user"></i>You</span>
+            <span><i class="sw dot-sample"></i>Sample (colour = RSSI)</span>
+            <span><i class="sw ring-est"></i>Probable node location</span>
+          </div>
+        </div>
+      </main>
+    </div>
+    <script>
+      // Minimal Node polyfill for tslog (bundled inside @meshtastic/core)
+      window.process = window.process || {
+        env: {},
+        cwd: () => "/",
+        argv: [],
+      };
+    </script>
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>

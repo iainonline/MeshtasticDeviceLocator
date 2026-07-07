@@ -1,3 +1,10 @@
+# Meshtastic Device Locator
+
+> **✨ New: Fabled Mesh web app** — a modern browser-based node locator lives
+> in [`web/`](web/README.md). Connect a Heltec V3 over USB-C (Web Serial),
+> pick a node, walk or drive around, and watch a live map plot the node's
+> probable location as an uncertainty circle. See `web/README.md` for setup.
+
 # GPS Reader for Raspberry Pi 5
 
 Read GPS data from your Android phone over WiFi LAN using GPSd Forwarder.
