@@ -535,87 +535,106 @@ class MeshTracker:
     def start_meshtastic_receiver(self):
         """Start Meshtastic receiver thread"""
         def mesh_worker():
-            try:
-                from pubsub import pub
-                
-                # Set up packet callback using pubsub
-                def on_receive(packet, interface):
-                    try:
-                        self.handle_mesh_packet(packet)
-                    except Exception as e:
-                        pass
-                
-                def on_connection(interface, topic=pub.AUTO_TOPIC):
-                    # Connection established
-                    pass
-                
-                # Subscribe to mesh packets
-                pub.subscribe(on_receive, "meshtastic.receive")
-                pub.subscribe(on_connection, "meshtastic.connection.established")
-                
-                # Connect to Meshtastic device
-                if self.meshtastic_port:
-                    self.mesh_interface = meshtastic.serial_interface.SerialInterface(self.meshtastic_port)
-                else:
-                    self.mesh_interface = meshtastic.serial_interface.SerialInterface()
-                
-                # Wait for nodeDB to populate (Meshtastic needs time to download node list)
-                if self.mesh_interface:
-                    self.console.print("[yellow]Connected to Meshtastic. Waiting for node database...[/yellow]")
-                    time.sleep(3)  # Give it time to populate the nodeDB
-                
-                # Also get existing nodes from nodeDB
-                if self.mesh_interface and hasattr(self.mesh_interface, 'nodes'):
-                    for node_id, node_info in self.mesh_interface.nodes.items():
+            retry_delay = 5  # seconds between reconnect attempts
+            subscribed = False
+
+            while self.running:
+                try:
+                    from pubsub import pub
+
+                    # Set up packet callback using pubsub (only once)
+                    if not subscribed:
+                        def on_receive(packet, interface):
+                            try:
+                                self.handle_mesh_packet(packet)
+                            except Exception:
+                                pass
+
+                        def on_connection(interface, topic=pub.AUTO_TOPIC):
+                            pass
+
+                        def on_connection_lost(interface, topic=pub.AUTO_TOPIC):
+                            self.mesh_interface = None
+
+                        pub.subscribe(on_receive, "meshtastic.receive")
+                        pub.subscribe(on_connection, "meshtastic.connection.established")
+                        pub.subscribe(on_connection_lost, "meshtastic.connection.lost")
+                        subscribed = True
+
+                    # Connect to Meshtastic device
+                    if self.meshtastic_port:
+                        self.mesh_interface = meshtastic.serial_interface.SerialInterface(self.meshtastic_port)
+                    else:
+                        self.mesh_interface = meshtastic.serial_interface.SerialInterface()
+
+                    # Wait for nodeDB to populate (Meshtastic needs time to download node list)
+                    if self.mesh_interface:
+                        self.console.print("[yellow]Connected to Meshtastic. Waiting for node database...[/yellow]")
+                        time.sleep(3)  # Give it time to populate the nodeDB
+
+                    # Also get existing nodes from nodeDB
+                    if self.mesh_interface and hasattr(self.mesh_interface, 'nodes'):
+                        for node_id, node_info in self.mesh_interface.nodes.items():
+                            try:
+                                # Create packet for existing nodes with proper user info
+                                fake_packet = {
+                                    'from': node_id,
+                                    'fromId': node_id,
+                                    'decoded': {}
+                                }
+
+                                # Extract user info - node_info is a dict
+                                if 'user' in node_info and node_info['user']:
+                                    user_dict = {}
+                                    user_data = node_info['user']
+                                    if 'shortName' in user_data and user_data['shortName']:
+                                        user_dict['shortName'] = user_data['shortName']
+                                    if 'longName' in user_data and user_data['longName']:
+                                        user_dict['longName'] = user_data['longName']
+
+                                    if user_dict:
+                                        fake_packet['user'] = user_dict
+
+                                # Extract position
+                                if 'position' in node_info and node_info['position']:
+                                    pos = node_info['position']
+                                    lat = pos.get('latitudeI', 0)
+                                    lon = pos.get('longitudeI', 0)
+                                    if lat != 0 and lon != 0:
+                                        fake_packet['decoded']['position'] = {
+                                            'latitude': lat / 1e7,
+                                            'longitude': lon / 1e7,
+                                            'altitude': pos.get('altitude', 0)
+                                        }
+
+                                self.handle_mesh_packet(fake_packet)
+                            except Exception:
+                                pass
+
+                    # Keep thread alive while connected
+                    while self.running and self.mesh_interface:
+                        time.sleep(1)
+
+                except Exception:
+                    # Device not connected or connection failed - retry after delay
+                    if self.mesh_interface:
                         try:
-                            # Create packet for existing nodes with proper user info
-                            fake_packet = {
-                                'from': node_id,
-                                'fromId': node_id,
-                                'decoded': {}
-                            }
-                            
-                            # Extract user info - node_info is a dict
-                            if 'user' in node_info and node_info['user']:
-                                user_dict = {}
-                                user_data = node_info['user']
-                                if 'shortName' in user_data and user_data['shortName']:
-                                    user_dict['shortName'] = user_data['shortName']
-                                if 'longName' in user_data and user_data['longName']:
-                                    user_dict['longName'] = user_data['longName']
-                                    
-                                if user_dict:
-                                    fake_packet['user'] = user_dict
-                            
-                            # Extract position
-                            if 'position' in node_info and node_info['position']:
-                                pos = node_info['position']
-                                lat = pos.get('latitudeI', 0)
-                                lon = pos.get('longitudeI', 0)
-                                if lat != 0 and lon != 0:
-                                    fake_packet['decoded']['position'] = {
-                                        'latitude': lat / 1e7,
-                                        'longitude': lon / 1e7,
-                                        'altitude': pos.get('altitude', 0)
-                                    }
-                            
-                            self.handle_mesh_packet(fake_packet)
+                            self.mesh_interface.close()
                         except Exception:
                             pass
-                
-                # Keep thread alive
-                while self.running:
-                    time.sleep(1)
-                    
-            except Exception as e:
-                # Silently continue if no Meshtastic device - user may be testing GPS only
-                pass
-            finally:
-                if self.mesh_interface:
-                    try:
-                        self.mesh_interface.close()
-                    except:
-                        pass
+                        self.mesh_interface = None
+                    for _ in range(retry_delay):
+                        if not self.running:
+                            return
+                        time.sleep(1)
+
+            # Clean up on exit
+            if self.mesh_interface:
+                try:
+                    self.mesh_interface.close()
+                except Exception:
+                    pass
+                self.mesh_interface = None
         
         self.mesh_thread = threading.Thread(target=mesh_worker, daemon=True)
         self.mesh_thread.start()

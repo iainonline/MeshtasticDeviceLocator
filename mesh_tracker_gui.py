@@ -1363,6 +1363,7 @@ class MeshTrackerGUI:
             # Only subscribe once - check if already subscribed
             if not hasattr(self, '_pubsub_subscribed'):
                 pub.subscribe(self._packet_handler_callback, "meshtastic.receive")
+                pub.subscribe(self._connection_lost_callback, "meshtastic.connection.lost")
                 self._pubsub_subscribed = True
                 logger.debug("Meshtastic packet handler registered via pubsub")
             
@@ -1710,15 +1711,34 @@ class MeshTrackerGUI:
         threading.Thread(target=reconnect_thread, daemon=True).start()
     
     def mesh_receiver_thread(self):
-        """Receive Meshtastic packets"""
+        """Receive Meshtastic packets - continuously reconnect if connection drops or device plugged in later"""
         print("[DEBUG] Starting Meshtastic receiver")
-        try:
-            self.connect_meshtastic()
-        except Exception as e:
-            print(f"[ERROR] Meshtastic thread error: {e}")
-            print("[INFO] Continuing without Meshtastic connection")
-            import traceback
-            traceback.print_exc()
+        retry_delay = 5  # seconds between reconnect attempts
+
+        while self.running:
+            try:
+                if not self.mesh_connected:
+                    print("[DEBUG] Attempting Meshtastic connection...")
+                    self.connect_meshtastic()
+                    if not self.mesh_connected:
+                        # Wait before retrying, checking running flag each second
+                        for _ in range(retry_delay):
+                            if not self.running:
+                                return
+                            time.sleep(1)
+                else:
+                    time.sleep(1)
+            except Exception as e:
+                print(f"[ERROR] Meshtastic thread error: {e}")
+                self.mesh_connected = False
+                import traceback
+                traceback.print_exc()
+                for _ in range(retry_delay):
+                    if not self.running:
+                        return
+                    time.sleep(1)
+
+        print("[DEBUG] Meshtastic receiver thread exiting")
     
     def _packet_handler_callback(self, packet, interface):
         """Callback for pubsub mesh packet reception"""
@@ -1729,6 +1749,15 @@ class MeshTrackerGUI:
             print(f"[ERROR] Packet handler exception: {e}")
             import traceback
             traceback.print_exc()
+
+    def _connection_lost_callback(self, interface, topic=None):
+        """Callback when Meshtastic connection is lost"""
+        print("[DEBUG] Meshtastic connection lost")
+        self.mesh_connected = False
+        self.local_node_name = "Disconnected"
+        self.log_traffic("⚠️ USB connection lost - will attempt to reconnect...")
+        if hasattr(self, 'root'):
+            self.root.after(100, self.update_display)
             
     def handle_mesh_packet(self, packet: dict):
         """Handle incoming Meshtastic packet"""
