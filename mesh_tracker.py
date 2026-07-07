@@ -615,8 +615,9 @@ class MeshTracker:
                     while self.running and self.mesh_interface:
                         time.sleep(1)
 
-                except Exception:
+                except Exception as e:
                     # Device not connected or connection failed - retry after delay
+                    self.console.print(f"[yellow]Meshtastic connection failed: {e}. Retrying in {retry_delay}s...[/yellow]")
                     if self.mesh_interface:
                         try:
                             self.mesh_interface.close()
