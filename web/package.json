@@ -6,7 +6,8 @@
   "scripts": {
     "dev": "vite --host",
     "build": "vite build",
-    "preview": "vite preview --host"
+    "preview": "vite preview --host",
+    "start": "vite preview"
   },
   "dependencies": {
     "@meshtastic/core": "^2.6.7",
