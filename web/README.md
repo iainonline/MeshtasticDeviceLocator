@@ -1,17 +1,21 @@
 # Fabled Mesh — Meshtastic Node Locator (Web App)
 
-A modern, browser-based rewrite of the Python mesh tracker. Plug a
-**Heltec V3** (or any Meshtastic serial device) into your phone or laptop via
-**USB-C**, pick a node from the mesh, then walk or drive around while the app
-fuses your GPS track with the node's signal strength to plot its **probable
-location as a circle on a live map** — the circle's size is the uncertainty.
+A modern, browser-based rewrite of the Python mesh tracker. Connect a
+**Heltec V3** (or any Meshtastic device) via **USB-C or Bluetooth**, pick a
+node from the mesh, then walk or drive around while the app fuses your GPS
+track with the node's signal strength to plot its **probable location as a
+circle on a live map** — the circle's size is the uncertainty.
 
 ## How it works
 
-1. **USB-C connection** — the app talks to the radio with the
+1. **Connection** — USB-C via the
    [Web Serial API](https://developer.mozilla.org/docs/Web/API/Web_Serial_API)
-   using the official `@meshtastic/core` + `@meshtastic/transport-web-serial`
-   libraries (115200 baud).
+   (`@meshtastic/transport-web-serial`, 115200 baud), or Bluetooth LE via the
+   [Web Bluetooth API](https://developer.mozilla.org/docs/Web/API/Web_Bluetooth_API)
+   (`@meshtastic/transport-web-bluetooth`) — pick whichever the "Connect"
+   buttons show as working; **Bluetooth is the more reliable option on
+   Android** (see below). Both go through the official `@meshtastic/core`
+   library.
 2. **Your position** — the browser Geolocation API streams your phone's GPS;
    you appear as a pulsing blue dot with an accuracy ring.
 3. **Sampling** — every packet received *directly* from the target node
@@ -31,29 +35,33 @@ node's *self-reported* GPS position when it broadcasts one, for comparison.
 
 ## Requirements
 
-- **Browser with Web Serial**: Chrome or Edge on desktop, or **Chrome on
-  Android** (connect the Heltec V3 with a USB-C OTG cable). iOS Safari does
-  not support Web Serial.
+- **Browser**: Chrome or Edge, desktop or Android. iOS Safari supports
+  neither Web Serial nor Web Bluetooth, so it can't be used at all.
 - **Secure context**: `localhost` or HTTPS (the dev server below serves
   self-signed HTTPS so a phone on your LAN can connect).
-- A Heltec V3 running Meshtastic firmware with the serial console left at
-  defaults.
+- A Heltec V3 running Meshtastic firmware, serial console and Bluetooth
+  left at defaults.
 
-### Android: "No compatible devices found"
+### Android: "No compatible devices found" over USB — use Bluetooth instead
 
-Chrome on Android can only offer a device in the Web Serial picker if the
-request is filtered by USB vendor ID — without a filter it always reports
-"No compatible devices found", even for hardware the native Meshtastic app
-connects to fine (that app uses Android's USB host API directly, not Web
-Serial). This app requests the vendor IDs used by Meshtastic boards
-(Silicon Labs CP210x/CP2102N, WCH CH340/CH341, FTDI, Prolific, and native
-Espressif USB), which covers the Heltec V3. If your device still isn't
-listed:
+Chrome for Android can only offer a device in the Web Serial picker for
+USB-serial chips its built-in driver library recognizes. Depending on
+which USB-UART chip your Heltec V3 batch actually has (Silicon Labs
+CP2102N vs. WCH CH9102), and on the phone/Android/Chrome version, Android
+sometimes can't identify the chip **at all** — no filter passed from a web
+app can work around that, since detection happens before filtering. This
+is a platform limitation, not specific to this app: the native Meshtastic
+app doesn't hit it because it talks to Android's USB host API directly
+instead of going through Chrome's Web Serial driver table.
 
-- Use a **USB-C OTG cable/adapter** and plug the radio in *before* tapping
-  **Connect USB**.
-- Make sure no other app/tab already holds the serial port open.
-- As a fallback, connect from desktop Chrome or Edge instead.
+**If "Connect USB" shows no devices on Android, use "Connect Bluetooth"
+instead** — it pairs over the Meshtastic BLE GATT service, which doesn't
+depend on USB chip recognition and works reliably on Android. Make sure
+Bluetooth is enabled on the radio (Meshtastic app → Radio Config →
+Bluetooth) and the device is powered on and in range.
+
+Desktop Chrome/Edge over USB doesn't have this limitation and is the most
+reliable option when available.
 
 ## Run it
 

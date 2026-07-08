@@ -10,6 +10,7 @@
   },
   "dependencies": {
     "@meshtastic/core": "^2.6.7",
+    "@meshtastic/transport-web-bluetooth": "^0.1.5",
     "@meshtastic/transport-web-serial": "^0.2.5",
     "leaflet": "^1.9.4"
   },

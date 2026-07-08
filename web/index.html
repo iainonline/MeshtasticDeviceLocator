@@ -15,7 +15,11 @@
           <span id="gps-badge" class="badge off" title="Phone GPS">GPS</span>
           <span id="radio-badge" class="badge off" title="Meshtastic device">Radio</span>
         </div>
-        <button id="btn-connect" class="primary">Connect USB</button>
+        <span id="connect-buttons">
+          <button id="btn-connect-usb" class="primary">Connect USB</button>
+          <button id="btn-connect-ble" class="primary">Connect Bluetooth</button>
+        </span>
+        <button id="btn-disconnect" class="danger hidden">Disconnect</button>
         <button id="btn-panel" class="ghost" aria-label="Toggle panel">☰</button>
       </header>
 
@@ -25,7 +29,8 @@
             <h2>Device</h2>
             <div id="device-info" class="muted">
               Not connected. Plug the Heltec V3 in via USB-C and press
-              <b>Connect USB</b>.
+              <b>Connect USB</b>, or pair it over <b>Connect Bluetooth</b> if
+              USB isn't detected (common on Android).
             </div>
           </section>
 

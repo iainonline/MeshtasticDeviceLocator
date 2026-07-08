@@ -1,5 +1,5 @@
 import "./style.css";
-import { Radio, webSerialSupported } from "./radio.js";
+import { Radio, webSerialSupported, webBluetoothSupported } from "./radio.js";
 import { GeoWatcher } from "./geo.js";
 import { LocatorMap } from "./map.js";
 import {
@@ -247,18 +247,33 @@ function exportJsonl() {
 
 /* ---------------- radio connection ---------------- */
 
-async function connect() {
-  if (!webSerialSupported()) {
-    log("Web Serial is not supported here. Use Chrome/Edge on desktop, or Chrome on Android with a USB-C OTG connection.", true);
+function setConnecting(isConnecting) {
+  $("btn-connect-usb").disabled = isConnecting;
+  $("btn-connect-ble").disabled = isConnecting;
+  if (isConnecting) {
+    $("btn-connect-usb").textContent = "Connecting…";
+    $("btn-connect-ble").textContent = "Connecting…";
+  } else {
+    $("btn-connect-usb").textContent = "Connect USB";
+    $("btn-connect-ble").textContent = "Connect Bluetooth";
+  }
+}
+
+async function connect(transport) {
+  if (transport === "usb" && !webSerialSupported()) {
+    log("Web Serial is not supported here. Try Connect Bluetooth instead, or use Chrome/Edge on desktop.", true);
     return;
   }
-  $("btn-connect").disabled = true;
-  $("btn-connect").textContent = "Connecting…";
+  if (transport === "bluetooth" && !webBluetoothSupported()) {
+    log("Web Bluetooth is not supported here. Try Connect USB instead, or use Chrome/Edge on desktop.", true);
+    return;
+  }
+  setConnecting(true);
   try {
     state.radio = new Radio({
       onMyNode: (num) => {
         state.myNodeNum = num;
-        $("device-info").innerHTML = `Connected to Heltec V3 · my node <b>!${(num >>> 0).toString(16)}</b>`;
+        $("device-info").innerHTML = `Connected to Heltec V3 (${transport}) · my node <b>!${(num >>> 0).toString(16)}</b>`;
         renderNodes();
       },
       onNodes: () => renderNodes(),
@@ -268,25 +283,30 @@ async function connect() {
         if (status <= 2 && state.connected) handleDisconnect();
       },
     });
-    await state.radio.connect();
+    await state.radio.connect(transport);
     state.connected = true;
     $("radio-badge").classList.replace("off", "on");
-    $("btn-connect").textContent = "Disconnect";
-    $("btn-connect").disabled = false;
-    log("Radio connected and configured.");
+    $("connect-buttons").classList.add("hidden");
+    $("btn-disconnect").classList.remove("hidden");
+    setConnecting(false);
+    log(`Radio connected over ${transport === "bluetooth" ? "Bluetooth" : "USB"} and configured.`);
     restartPingTimer();
   } catch (e) {
     const msg = e?.message || String(e);
-    if (/no port selected|no compatible device|not found/i.test(msg)) {
+    if (transport === "usb" && /no port selected|no compatible device|not found/i.test(msg)) {
       log(
-        "No device shown in the picker. On Android: use a USB-C OTG cable/adapter and make sure the radio is plugged in before tapping Connect — Android Chrome only lists devices with a recognized USB-serial chip (Silicon Labs, CH340, FTDI, Prolific, or native Espressif USB). If it's still not listed, try desktop Chrome/Edge instead.",
+        "No USB device shown in the picker. This Android/Chrome combo doesn't recognize the Heltec V3's USB-serial chip over Web Serial — try Connect Bluetooth instead (pair the radio first in Android Bluetooth settings if it doesn't appear).",
+        true,
+      );
+    } else if (transport === "bluetooth" && /no devices found|cancelled|user cancel/i.test(msg)) {
+      log(
+        "No Bluetooth device selected. Make sure the radio's Bluetooth is enabled (Meshtastic app → Radio Config → Bluetooth) and it's powered on and in range.",
         true,
       );
     } else {
       log(`Connect failed: ${msg}`, true);
     }
-    $("btn-connect").textContent = "Connect USB";
-    $("btn-connect").disabled = false;
+    setConnecting(false);
     try {
       await state.radio?.disconnect();
     } catch {
@@ -300,8 +320,9 @@ function handleDisconnect() {
   state.connected = false;
   clearInterval(state.pingTimer);
   $("radio-badge").classList.replace("on", "off");
-  $("btn-connect").textContent = "Connect USB";
-  $("btn-connect").disabled = false;
+  $("connect-buttons").classList.remove("hidden");
+  $("btn-disconnect").classList.add("hidden");
+  setConnecting(false);
   $("device-info").textContent = "Disconnected.";
   log("Radio disconnected.", true);
 }
@@ -340,9 +361,9 @@ state.estimateTimer = setInterval(() => {
 
 /* ---------------- UI wiring ---------------- */
 
-$("btn-connect").addEventListener("click", () =>
-  state.connected ? disconnect() : connect(),
-);
+$("btn-connect-usb").addEventListener("click", () => connect("usb"));
+$("btn-connect-ble").addEventListener("click", () => connect("bluetooth"));
+$("btn-disconnect").addEventListener("click", () => disconnect());
 $("btn-clear").addEventListener("click", () => {
   state.samples = [];
   state.estimate = null;
@@ -386,10 +407,13 @@ $("btn-panel").addEventListener("click", () =>
 /* ---------------- boot ---------------- */
 
 if (!window.isSecureContext) {
-  log("Not a secure context — Web Serial and GPS will be unavailable. Serve over HTTPS or localhost.", true);
+  log("Not a secure context — Web Serial, Web Bluetooth and GPS will be unavailable. Serve over HTTPS or localhost.", true);
 }
-if (!webSerialSupported()) {
-  log("This browser lacks Web Serial. Use Chrome or Edge (Android Chrome works via USB-C OTG).", true);
+if (!webSerialSupported() && !webBluetoothSupported()) {
+  log("This browser supports neither Web Serial nor Web Bluetooth. Use Chrome or Edge.", true);
+} else {
+  if (!webSerialSupported()) $("btn-connect-usb").classList.add("hidden");
+  if (!webBluetoothSupported()) $("btn-connect-ble").classList.add("hidden");
 }
 geo.start();
-log("Ready. Connect your Heltec V3 via USB-C, then pick a node to hunt.");
+log("Ready. Connect your Heltec V3 via USB-C or Bluetooth, then pick a node to hunt.");

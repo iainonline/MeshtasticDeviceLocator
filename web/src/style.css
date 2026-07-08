@@ -109,6 +109,15 @@ button.ghost {
   display: none;
 }
 
+#connect-buttons {
+  display: flex;
+  gap: 8px;
+}
+
+.hidden {
+  display: none !important;
+}
+
 /* ---------- layout ---------- */
 #content {
   display: flex;

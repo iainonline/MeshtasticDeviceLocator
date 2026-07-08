@@ -1,13 +1,27 @@
 /**
- * Meshtastic device connection over USB-C (Web Serial), built on the
- * official @meshtastic/core + @meshtastic/transport-web-serial packages.
- * Tested target: Heltec V3 (ESP32-S3 + SX1262), 115200 baud.
+ * Meshtastic device connection, built on the official @meshtastic/core
+ * packages. Two transports are supported:
+ *
+ *  - USB-C (Web Serial): fast and simple, but Android Chrome can only
+ *    offer a device in the picker if it recognizes the USB-serial chip
+ *    (see KNOWN_VENDOR_IDS below) — some boards/cables/Android versions
+ *    never surface a device at all, regardless of filters.
+ *  - Bluetooth LE (Web Bluetooth): the reliable fallback on Android,
+ *    since it filters by the Meshtastic GATT service UUID rather than
+ *    depending on Android's built-in USB-serial driver recognition.
+ *
+ * Tested target: Heltec V3 (ESP32-S3 + SX1262).
  */
 import { MeshDevice } from "@meshtastic/core";
 import { TransportWebSerial } from "@meshtastic/transport-web-serial";
+import { TransportWebBluetooth } from "@meshtastic/transport-web-bluetooth";
 
 export function webSerialSupported() {
   return "serial" in navigator;
+}
+
+export function webBluetoothSupported() {
+  return "bluetooth" in navigator;
 }
 
 // USB vendor IDs for the serial chips found on common Meshtastic boards.
@@ -42,10 +56,14 @@ export class Radio {
     this.nodes = new Map();
   }
 
-  /** Prompt for a serial port and bring the device up. */
-  async connect() {
-    const port = await requestSerialPort();
-    this.transport = await TransportWebSerial.createFromPort(port, 115200);
+  /** Prompt for a device over the given transport ("usb" | "bluetooth") and bring it up. */
+  async connect(transport = "usb") {
+    if (transport === "bluetooth") {
+      this.transport = await TransportWebBluetooth.create();
+    } else {
+      const port = await requestSerialPort();
+      this.transport = await TransportWebSerial.createFromPort(port, 115200);
+    }
     this.device = new MeshDevice(this.transport);
     // Quiet the bundled logger; the app surfaces its own status.
     this.device.log.settings.minLevel = 5;
