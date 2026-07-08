@@ -10,6 +10,28 @@ export function webSerialSupported() {
   return "serial" in navigator;
 }
 
+// USB vendor IDs for the serial chips found on common Meshtastic boards.
+// Passing these as filters is required for Web Serial to work on Android:
+// unlike desktop, Chrome for Android can only surface a device in the
+// port picker when the request includes a vendor/product filter it can use
+// to ask the OS for USB permission — an unfiltered requestPort() always
+// reports "No compatible devices found" there, even though the exact same
+// hardware is visible to the native Meshtastic app (which uses Android's
+// USB host API directly, not Web Serial).
+const KNOWN_VENDOR_IDS = [
+  0x10c4, // Silicon Labs CP210x / CP2102N (Heltec V3, many others)
+  0x1a86, // WCH CH340 / CH341 / CH9102
+  0x0403, // FTDI FT230X / FT232
+  0x067b, // Prolific PL2303
+  0x303a, // Espressif (native USB-JTAG/CDC on some ESP32-S3 boards)
+];
+
+async function requestSerialPort() {
+  return navigator.serial.requestPort({
+    filters: KNOWN_VENDOR_IDS.map((usbVendorId) => ({ usbVendorId })),
+  });
+}
+
 export class Radio {
   constructor(handlers = {}) {
     this.handlers = handlers;
@@ -22,7 +44,8 @@ export class Radio {
 
   /** Prompt for a serial port and bring the device up. */
   async connect() {
-    this.transport = await TransportWebSerial.create(115200);
+    const port = await requestSerialPort();
+    this.transport = await TransportWebSerial.createFromPort(port, 115200);
     this.device = new MeshDevice(this.transport);
     // Quiet the bundled logger; the app surfaces its own status.
     this.device.log.settings.minLevel = 5;

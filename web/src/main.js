@@ -276,7 +276,15 @@ async function connect() {
     log("Radio connected and configured.");
     restartPingTimer();
   } catch (e) {
-    log(`Connect failed: ${e?.message || e}`, true);
+    const msg = e?.message || String(e);
+    if (/no port selected|no compatible device|not found/i.test(msg)) {
+      log(
+        "No device shown in the picker. On Android: use a USB-C OTG cable/adapter and make sure the radio is plugged in before tapping Connect — Android Chrome only lists devices with a recognized USB-serial chip (Silicon Labs, CH340, FTDI, Prolific, or native Espressif USB). If it's still not listed, try desktop Chrome/Edge instead.",
+        true,
+      );
+    } else {
+      log(`Connect failed: ${msg}`, true);
+    }
     $("btn-connect").textContent = "Connect USB";
     $("btn-connect").disabled = false;
     try {

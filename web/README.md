@@ -39,6 +39,22 @@ node's *self-reported* GPS position when it broadcasts one, for comparison.
 - A Heltec V3 running Meshtastic firmware with the serial console left at
   defaults.
 
+### Android: "No compatible devices found"
+
+Chrome on Android can only offer a device in the Web Serial picker if the
+request is filtered by USB vendor ID — without a filter it always reports
+"No compatible devices found", even for hardware the native Meshtastic app
+connects to fine (that app uses Android's USB host API directly, not Web
+Serial). This app requests the vendor IDs used by Meshtastic boards
+(Silicon Labs CP210x/CP2102N, WCH CH340/CH341, FTDI, Prolific, and native
+Espressif USB), which covers the Heltec V3. If your device still isn't
+listed:
+
+- Use a **USB-C OTG cable/adapter** and plug the radio in *before* tapping
+  **Connect USB**.
+- Make sure no other app/tab already holds the serial port open.
+- As a fallback, connect from desktop Chrome or Edge instead.
+
 ## Run it
 
 ```bash
