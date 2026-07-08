@@ -439,17 +439,47 @@ $("btn-copy-log").addEventListener("click", async () => {
 
 /* ---------------- boot ---------------- */
 
+// Never silently hide a connect option — say exactly why it's unavailable,
+// since "the button just isn't there" is unbdebuggable from the user's side.
+function browserCompatNote(ua) {
+  if (/SamsungBrowser/i.test(ua)) {
+    return "Samsung Internet doesn't implement this API — open this page in Chrome instead.";
+  }
+  if (/FBAN|FBAV|Instagram|Line\/|MicroMessenger|Twitter/i.test(ua)) {
+    return "This looks like an in-app browser (social/messaging app) — these block this API even when Chromium-based. Open this page in Chrome directly.";
+  }
+  if (/iPhone|iPad|iPod/i.test(ua) && !/CriOS|EdgiOS/i.test(ua)) {
+    return "iOS Safari (and all iOS browsers, since Apple forces them to use Safari's engine) does not support this API at all — Web Serial/Bluetooth are Android/desktop-only.";
+  }
+  if (/Firefox/i.test(ua)) {
+    return "Firefox doesn't implement this API — use Chrome or Edge.";
+  }
+  if (!/Chrome|Chromium|CriOS|Edg\//i.test(ua)) {
+    return "This browser doesn't appear to be Chrome/Edge — those are required for this API.";
+  }
+  return "This specific browser build doesn't expose this API (older version, or disabled by an enterprise/device policy).";
+}
+
 log(
   `Environment: secureContext=${window.isSecureContext} webSerial=${webSerialSupported()} webBluetooth=${webBluetoothSupported()} UA="${navigator.userAgent}"`,
 );
 if (!window.isSecureContext) {
   log("Not a secure context — Web Serial, Web Bluetooth and GPS will be unavailable. Serve over HTTPS or localhost.", true);
 }
+if (!webSerialSupported()) {
+  const note = browserCompatNote(navigator.userAgent);
+  $("btn-connect-usb").disabled = true;
+  $("btn-connect-usb").title = `USB unavailable: ${note}`;
+  log(`Connect USB is disabled: Web Serial isn't available here. ${note}`, true);
+}
+if (!webBluetoothSupported()) {
+  const note = browserCompatNote(navigator.userAgent);
+  $("btn-connect-ble").disabled = true;
+  $("btn-connect-ble").title = `Bluetooth unavailable: ${note}`;
+  log(`Connect Bluetooth is disabled: Web Bluetooth isn't available here. ${note}`, true);
+}
 if (!webSerialSupported() && !webBluetoothSupported()) {
-  log("This browser supports neither Web Serial nor Web Bluetooth. Use Chrome or Edge.", true);
-} else {
-  if (!webSerialSupported()) $("btn-connect-usb").classList.add("hidden");
-  if (!webBluetoothSupported()) $("btn-connect-ble").classList.add("hidden");
+  log("Neither connection method works in this browser. Open this page in Chrome or Edge on Android or desktop.", true);
 }
 geo.start();
 log("Ready. Connect your Heltec V3 via USB-C or Bluetooth, then pick a node to hunt.");
