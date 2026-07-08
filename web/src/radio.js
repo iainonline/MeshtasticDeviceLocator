@@ -16,6 +16,16 @@ import { MeshDevice } from "@meshtastic/core";
 import { TransportWebSerial } from "@meshtastic/transport-web-serial";
 import { TransportWebBluetooth } from "@meshtastic/transport-web-bluetooth";
 
+const STATUS_NAMES = {
+  1: "Restarting",
+  2: "Disconnected",
+  3: "Connecting",
+  4: "Reconnecting",
+  5: "Connected",
+  6: "Configuring",
+  7: "Configured",
+};
+
 export function webSerialSupported() {
   return "serial" in navigator;
 }
@@ -58,24 +68,80 @@ export class Radio {
 
   /** Prompt for a device over the given transport ("usb" | "bluetooth") and bring it up. */
   async connect(transport = "usb") {
-    if (transport === "bluetooth") {
-      this.transport = await TransportWebBluetooth.create();
-    } else {
-      const port = await requestSerialPort();
-      this.transport = await TransportWebSerial.createFromPort(port, 115200);
+    const dbg = (msg) => {
+      try {
+        this.handlers.onDebug?.(msg);
+      } catch {
+        /* a bad debug handler must never break the connection */
+      }
+    };
+
+    dbg(`Starting ${transport} connection. UA: ${navigator.userAgent}`);
+    try {
+      if (transport === "bluetooth") {
+        dbg(
+          `Requesting Bluetooth device (filtering by Meshtastic GATT service ${TransportWebBluetooth.ServiceUuid})…`,
+        );
+        const device = await navigator.bluetooth.requestDevice({
+          filters: [{ services: [TransportWebBluetooth.ServiceUuid] }],
+        });
+        dbg(`Bluetooth device selected: "${device.name || "(unnamed)"}" id=${device.id}`);
+        device.addEventListener("gattserverdisconnected", () =>
+          dbg("BLE: gattserverdisconnected event fired"),
+        );
+        dbg("Connecting GATT server and resolving read/write/notify characteristics…");
+        this.transport = await TransportWebBluetooth.createFromDevice(device);
+        dbg("Bluetooth transport ready (GATT connected, characteristics resolved).");
+      } else {
+        dbg(
+          `Requesting serial port (vendor filters: ${KNOWN_VENDOR_IDS.map((v) => "0x" + v.toString(16)).join(", ")})…`,
+        );
+        const port = await requestSerialPort();
+        const info = port.getInfo?.() || {};
+        dbg(
+          `Port selected. usbVendorId=${info.usbVendorId ?? "?"} usbProductId=${info.usbProductId ?? "?"}. Opening at 115200 baud…`,
+        );
+        this.transport = await TransportWebSerial.createFromPort(port, 115200);
+        dbg("Serial transport ready (port open).");
+      }
+    } catch (err) {
+      dbg(`Transport creation FAILED: ${err?.name || "Error"}: ${err?.message || err}`);
+      throw err;
     }
+
+    dbg("Creating MeshDevice and subscribing to protocol events…");
     this.device = new MeshDevice(this.transport);
-    // Quiet the bundled logger; the app surfaces its own status.
+    // Quiet the bundled console logger; we mirror everything through onDebug instead.
     this.device.log.settings.minLevel = 5;
 
     const ev = this.device.events;
 
+    let fromRadioCount = 0;
+    ev.onFromRadio.subscribe(() => {
+      fromRadioCount += 1;
+      if (fromRadioCount === 1 || fromRadioCount % 20 === 0) {
+        dbg(`Received ${fromRadioCount} FromRadio message(s) so far.`);
+      }
+    });
+
+    ev.onLogEvent.subscribe((log) => {
+      dbg(`device log [level ${log.level}]: ${log.message}`);
+    });
+
+    ev.onDeviceStatus.subscribe((status) => {
+      dbg(`Device status -> ${STATUS_NAMES[status] || status}`);
+    });
+
     ev.onMyNodeInfo.subscribe((info) => {
+      dbg(`onMyNodeInfo: myNodeNum=${info.myNodeNum}`);
       this.myNodeNum = info.myNodeNum;
       this.handlers.onMyNode?.(info.myNodeNum);
     });
 
+    let nodeInfoCount = 0;
     ev.onNodeInfoPacket.subscribe((ni) => {
+      nodeInfoCount += 1;
+      dbg(`onNodeInfoPacket #${nodeInfoCount}: num=${ni.num} shortName=${ni.user?.shortName ?? "?"}`);
       const rec = this.nodes.get(ni.num) ?? { num: ni.num };
       rec.longName = ni.user?.longName || rec.longName;
       rec.shortName = ni.user?.shortName || rec.shortName;
@@ -126,7 +192,21 @@ export class Radio {
       this.handlers.onStatus?.(status);
     });
 
-    await this.device.configure();
+    dbg("Calling device.configure() (requesting node/channel config from radio)…");
+    const stall = setTimeout(() => {
+      dbg(
+        "Still waiting for configure() after 8s — the device hasn't replied yet. It may be busy, asleep, or the transport isn't actually delivering data.",
+      );
+    }, 8000);
+    try {
+      await this.device.configure();
+      dbg("configure() resolved — device is fully configured.");
+    } catch (err) {
+      dbg(`configure() FAILED: ${err?.name || "Error"}: ${err?.message || err}`);
+      throw err;
+    } finally {
+      clearTimeout(stall);
+    }
   }
 
   /**

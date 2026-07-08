@@ -28,13 +28,28 @@ const map = new LocatorMap($("map"));
 
 /* ---------------- logging ---------------- */
 
+// Full history (for "Copy debug log"), independent of the trimmed DOM list.
+const debugLines = [];
+
 function log(msg, isErr = false) {
+  const line = `${new Date().toLocaleTimeString()} ${isErr ? "[ERROR] " : ""}${msg}`;
+  debugLines.push(line);
+  if (debugLines.length > 1000) debugLines.shift();
+
   const el = document.createElement("div");
   if (isErr) el.className = "err";
-  el.textContent = `${new Date().toLocaleTimeString()} ${msg}`;
+  el.textContent = line;
   $("log").prepend(el);
-  while ($("log").childElementCount > 80) $("log").lastChild.remove();
+  while ($("log").childElementCount > 150) $("log").lastChild.remove();
 }
+
+window.addEventListener("error", (e) => {
+  log(`Uncaught error: ${e.message} (${e.filename?.split("/").pop()}:${e.lineno})`, true);
+});
+window.addEventListener("unhandledrejection", (e) => {
+  const r = e.reason;
+  log(`Unhandled promise rejection: ${r?.name || ""} ${r?.message || r}`, true);
+});
 
 /* ---------------- formatting ---------------- */
 
@@ -282,6 +297,7 @@ async function connect(transport) {
         // DeviceStatusEnum: 7 = configured, <=2 = disconnected
         if (status <= 2 && state.connected) handleDisconnect();
       },
+      onDebug: (msg) => log(msg),
     });
     await state.radio.connect(transport);
     state.connected = true;
@@ -293,6 +309,7 @@ async function connect(transport) {
     restartPingTimer();
   } catch (e) {
     const msg = e?.message || String(e);
+    log(`Connect failed: ${e?.name || "Error"}: ${msg}${e?.stack ? `\n${e.stack}` : ""}`, true);
     if (transport === "usb" && /no port selected|no compatible device|not found/i.test(msg)) {
       log(
         "No USB device shown in the picker. This Android/Chrome combo doesn't recognize the Heltec V3's USB-serial chip over Web Serial — try Connect Bluetooth instead (pair the radio first in Android Bluetooth settings if it doesn't appear).",
@@ -303,8 +320,6 @@ async function connect(transport) {
         "No Bluetooth device selected. Make sure the radio's Bluetooth is enabled (Meshtastic app → Radio Config → Bluetooth) and it's powered on and in range.",
         true,
       );
-    } else {
-      log(`Connect failed: ${msg}`, true);
     }
     setConnecting(false);
     try {
@@ -404,8 +419,29 @@ $("btn-panel").addEventListener("click", () =>
   $("panel").classList.toggle("open"),
 );
 
+$("btn-copy-log").addEventListener("click", async () => {
+  const text = debugLines.slice().reverse().join("\n");
+  try {
+    await navigator.clipboard.writeText(text);
+    $("btn-copy-log").textContent = "Copied!";
+  } catch {
+    // Clipboard API unavailable/blocked — fall back to a download.
+    const blob = new Blob([text], { type: "text/plain" });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = `fabled-mesh-debug-${Date.now()}.txt`;
+    a.click();
+    URL.revokeObjectURL(a.href);
+    $("btn-copy-log").textContent = "Downloaded";
+  }
+  setTimeout(() => ($("btn-copy-log").textContent = "Copy debug log"), 1500);
+});
+
 /* ---------------- boot ---------------- */
 
+log(
+  `Environment: secureContext=${window.isSecureContext} webSerial=${webSerialSupported()} webBluetooth=${webBluetoothSupported()} UA="${navigator.userAgent}"`,
+);
 if (!window.isSecureContext) {
   log("Not a secure context — Web Serial, Web Bluetooth and GPS will be unavailable. Serve over HTTPS or localhost.", true);
 }
