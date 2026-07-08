@@ -439,6 +439,9 @@ $("btn-copy-log").addEventListener("click", async () => {
 
 /* ---------------- boot ---------------- */
 
+$("build-id").textContent = `(build ${__BUILD_ID__})`;
+log(`Build: ${__BUILD_ID__} — if this doesn't match the latest change, this tab/browser is showing a cached page. Close the tab fully and reopen, or hard-refresh.`);
+
 // Never silently hide a connect option — say exactly why it's unavailable,
 // since "the button just isn't there" is unbdebuggable from the user's side.
 function browserCompatNote(ua) {

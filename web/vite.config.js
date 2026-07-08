@@ -6,8 +6,20 @@ import { fileURLToPath } from "node:url";
 // scope but only uses them behind runtime guards — shim them for the browser.
 const shim = fileURLToPath(new URL("./src/shims/node-shims.js", import.meta.url));
 
+// Stamped into the UI so a screenshot/log line proves which build is
+// actually loaded — Railway rebuilding doesn't mean a given browser tab or
+// cache is serving the new output, and that gap has been hard to diagnose
+// from outside. Prefer Railway's own commit SHA env var; fall back to a
+// build timestamp for local builds.
+const BUILD_ID =
+  process.env.RAILWAY_GIT_COMMIT_SHA?.slice(0, 7) ||
+  new Date().toISOString().replace(/[:.]/g, "-");
+
 export default defineConfig(({ mode }) => ({
   base: "./",
+  define: {
+    __BUILD_ID__: JSON.stringify(BUILD_ID),
+  },
   plugins: [
     // Web Serial and Geolocation require a secure context; self-signed HTTPS
     // lets a phone on the same LAN reach the local dev server. Only enable

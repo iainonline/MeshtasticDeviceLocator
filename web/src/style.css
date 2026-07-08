@@ -53,6 +53,14 @@ body {
   white-space: nowrap;
 }
 
+.build-id {
+  font-weight: 400;
+  font-size: 10px;
+  color: var(--muted);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  vertical-align: middle;
+}
+
 .badge {
   font-size: 11px;
   font-weight: 600;
