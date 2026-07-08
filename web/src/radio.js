@@ -89,9 +89,20 @@ export class Radio {
         device.addEventListener("gattserverdisconnected", () =>
           dbg("BLE: gattserverdisconnected event fired"),
         );
-        dbg("Connecting GATT server and resolving read/write/notify characteristics…");
-        this.transport = await TransportWebBluetooth.createFromDevice(device);
-        dbg("Bluetooth transport ready (GATT connected, characteristics resolved).");
+        dbg(
+          `Connecting GATT server and resolving read/write/notify characteristics… (visibilityState=${document.visibilityState}) — Android may now show a native pairing/bonding prompt outside this page; if so, the next log line only appears after you handle it.`,
+        );
+        const gattStall = setTimeout(() => {
+          dbg(
+            `Still waiting for GATT connect after 10s (visibilityState=${document.visibilityState}). If a system Bluetooth pairing dialog appeared, this page is paused until it's resolved.`,
+          );
+        }, 10000);
+        try {
+          this.transport = await TransportWebBluetooth.createFromDevice(device);
+        } finally {
+          clearTimeout(gattStall);
+        }
+        dbg(`Bluetooth transport ready (GATT connected, characteristics resolved). visibilityState=${document.visibilityState}`);
       } else {
         dbg(
           `Requesting serial port (vendor filters: ${KNOWN_VENDOR_IDS.map((v) => "0x" + v.toString(16)).join(", ")})…`,

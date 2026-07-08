@@ -31,10 +31,26 @@ const map = new LocatorMap($("map"));
 // Full history (for "Copy debug log"), independent of the trimmed DOM list.
 const debugLines = [];
 
+// Mirrored to localStorage on every line so that if the page is killed
+// outright (Android backgrounding a Custom Tab during a native Bluetooth
+// pairing dialog, an OOM kill, a crash) — not just navigated away from —
+// the log up to the last line written survives for the *next* load to
+// show, since in-memory state and a normal "beforeunload" handler are both
+// unreliable for that case (a hard kill fires neither).
+const LOG_STORAGE_KEY = "fabledMeshLog";
+function persistLog() {
+  try {
+    localStorage.setItem(LOG_STORAGE_KEY, JSON.stringify(debugLines.slice(-500)));
+  } catch {
+    /* storage full/unavailable — logging must never throw */
+  }
+}
+
 function log(msg, isErr = false) {
   const line = `${new Date().toLocaleTimeString()} ${isErr ? "[ERROR] " : ""}${msg}`;
   debugLines.push(line);
   if (debugLines.length > 1000) debugLines.shift();
+  persistLog();
 
   const el = document.createElement("div");
   if (isErr) el.className = "err";
@@ -50,6 +66,14 @@ window.addEventListener("unhandledrejection", (e) => {
   const r = e.reason;
   log(`Unhandled promise rejection: ${r?.name || ""} ${r?.message || r}`, true);
 });
+
+// Page lifecycle: log every transition so a recovered log shows whether the
+// page was still alive and just backgrounded, vs. never got a chance to log
+// anything further (i.e. was killed, not just hidden).
+for (const evt of ["visibilitychange", "pagehide", "pageshow", "freeze", "resume"]) {
+  document.addEventListener(evt, () => log(`Page lifecycle: ${evt} (visibilityState=${document.visibilityState})`));
+}
+window.addEventListener("beforeunload", () => log("Page lifecycle: beforeunload"));
 
 /* ---------------- formatting ---------------- */
 
@@ -438,6 +462,30 @@ $("btn-copy-log").addEventListener("click", async () => {
 });
 
 /* ---------------- boot ---------------- */
+
+// Recover the previous session's log (if any) before this session starts
+// overwriting the same storage key — this is what survives a hard page
+// kill (e.g. Android backgrounding/destroying the tab mid-Bluetooth-pairing)
+// that never gets to run beforeunload/pagehide.
+(() => {
+  try {
+    const prev = JSON.parse(localStorage.getItem(LOG_STORAGE_KEY) || "null");
+    if (Array.isArray(prev) && prev.length) {
+      const box = document.createElement("div");
+      box.style.cssText = "color:#d4a72c;border-top:1px dashed #d4a72c;margin-top:6px;padding-top:6px;";
+      box.textContent = `— Recovered log from previous session (last ${prev.length} lines, oldest first) —`;
+      $("log").appendChild(box);
+      for (const line of prev) {
+        const el = document.createElement("div");
+        el.textContent = line;
+        el.className = "muted";
+        $("log").appendChild(el);
+      }
+    }
+  } catch {
+    /* corrupt/unavailable storage — nothing to recover */
+  }
+})();
 
 $("build-id").textContent = `(build ${__BUILD_ID__})`;
 log(`Build: ${__BUILD_ID__} — if this doesn't match the latest change, this tab/browser is showing a cached page. Close the tab fully and reopen, or hard-refresh.`);
