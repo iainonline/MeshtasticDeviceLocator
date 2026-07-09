@@ -35,6 +35,17 @@ export default defineConfig(({ mode }) => ({
       util: shim,
     },
   },
+  build: {
+    rollupOptions: {
+      // Two independent entry points: the full tracker, and the minimal
+      // phone-side GPS forwarder (kept separate so the phone never has to
+      // download Leaflet/Meshtastic — see gps.html / src/gps-source.js).
+      input: {
+        main: fileURLToPath(new URL("./index.html", import.meta.url)),
+        gps: fileURLToPath(new URL("./gps.html", import.meta.url)),
+      },
+    },
+  },
   preview: {
     host: true,
     port: Number(process.env.PORT) || 4173,

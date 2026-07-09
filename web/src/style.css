@@ -291,6 +291,19 @@ button.ghost {
   margin-bottom: 6px;
 }
 
+.gps-code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 26px;
+  font-weight: 700;
+  letter-spacing: 0.15em;
+  text-align: center;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px;
+  margin-top: 8px;
+}
+
 .row {
   margin-top: 6px;
 }

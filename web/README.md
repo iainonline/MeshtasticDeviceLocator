@@ -16,8 +16,11 @@ circle on a live map** — the circle's size is the uncertainty.
    buttons show as working; **Bluetooth is the more reliable option on
    Android** (see below). Both go through the official `@meshtastic/core`
    library.
-2. **Your position** — the browser Geolocation API streams your phone's GPS;
-   you appear as a pulsing blue dot with an accuracy ring.
+2. **Your position** — by default, the browser Geolocation API streams the
+   position of whatever device is running the app, and you appear as a
+   pulsing blue dot with an accuracy ring. If that device has no GPS of its
+   own (e.g. a Raspberry Pi wired to the radio over USB), switch **GPS
+   Source** to **Phone GPS (via code)** instead — see below.
 3. **Sampling** — every packet received *directly* from the target node
    (0 hops, not via MQTT) yields an `(your lat/lon, RSSI, SNR)` sample.
    Relayed packets are skipped because their RSSI describes the relay, not
@@ -63,6 +66,24 @@ Bluetooth) and the device is powered on and in range.
 Desktop Chrome/Edge over USB doesn't have this limitation and is the most
 reliable option when available.
 
+## Using a phone as the GPS source (e.g. a Pi5 running the tracker)
+
+If you run the tracker on a machine with no GPS — a Raspberry Pi wired to
+the Heltec V3 over USB is the common case — set **GPS Source** to **Phone
+GPS (via code)** in the panel. This generates a short session code and a
+link. Open that link on your phone (`/gps.html?s=CODE`, or open `/gps.html`
+directly and type the code in) — it's a minimal page that just watches your
+phone's GPS and streams it to the tracker in real time over the app's own
+server. This replaces what the old Python app used a third-party "GPSd
+Forwarder" Android app + your LAN's `gpsd` protocol for; here it's a small
+built-in WebSocket relay instead, and works over the internet as well as a
+LAN since it goes through wherever the app itself is hosted. Only a lat/lon
+stream passes through the relay — no radio data, no third party involved.
+
+Keep the phone's forwarder page open and its screen on while tracking (it
+requests a wake lock automatically where supported); backgrounding it will
+pause GPS updates like any browser tab.
+
 ## Run it
 
 ```bash
@@ -74,9 +95,18 @@ npm run dev
 - On the same machine: open `https://localhost:5173`.
 - From a phone: open `https://<your-computer-ip>:5173`, accept the
   self-signed-certificate warning, then plug the radio into the **phone**.
-  (For a phone-only setup, `npm run build` and host `dist/` on any HTTPS
-  static host — the app is fully client-side; nothing leaves the browser
-  except map-tile requests.)
+
+`npm run dev` is for local UI development only — it doesn't run the GPS
+relay's WebSocket server. To test that end-to-end (or to deploy for real),
+build and run the production server instead:
+
+```bash
+npm run build
+npm run start   # node server.js — serves dist/ and hosts the GPS relay
+```
+
+This is what Railway (or any host that can run a persistent Node process)
+runs in production.
 
 Then:
 

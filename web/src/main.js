@@ -1,6 +1,7 @@
 import "./style.css";
 import { Radio, webSerialSupported, webBluetoothSupported } from "./radio.js";
 import { GeoWatcher } from "./geo.js";
+import { RemoteGpsClient, makeSessionCode } from "./remote-gps.js";
 import { LocatorMap } from "./map.js";
 import {
   DEFAULT_PARAMS,
@@ -22,6 +23,8 @@ const state = {
   pingTimer: null,
   estimateTimer: null,
   nodeFilter: "",
+  gpsMode: "local", // "local" | "remote"
+  remoteSessionId: null,
 };
 
 const map = new LocatorMap($("map"));
@@ -372,24 +375,79 @@ async function disconnect() {
   handleDisconnect();
 }
 
-/* ---------------- phone GPS ---------------- */
+/* ---------------- GPS: local device or relayed from a phone ---------------- */
+
+function handleGpsFix(fix, sourceLabel) {
+  const first = !state.gpsFix;
+  state.gpsFix = fix;
+  $("gps-badge").classList.remove("off", "warn");
+  $("gps-badge").classList.add(fix.accuracyM <= 30 ? "on" : "warn");
+  $("gps-badge").textContent = `GPS ±${Math.round(fix.accuracyM)}m`;
+  map.updateUser(fix);
+  if (first) log(`${sourceLabel} GPS fix acquired (±${Math.round(fix.accuracyM)} m).`);
+}
+
+function handleGpsError(msg) {
+  $("gps-badge").classList.remove("on", "warn");
+  $("gps-badge").classList.add("off");
+  log(`GPS: ${msg}`, true);
+}
 
 const geo = new GeoWatcher(
-  (fix) => {
-    const first = !state.gpsFix;
-    state.gpsFix = fix;
-    $("gps-badge").classList.remove("off", "warn");
-    $("gps-badge").classList.add(fix.accuracyM <= 30 ? "on" : "warn");
-    $("gps-badge").textContent = `GPS ±${Math.round(fix.accuracyM)}m`;
-    map.updateUser(fix);
-    if (first) log(`Phone GPS fix acquired (±${Math.round(fix.accuracyM)} m).`);
-  },
-  (msg) => {
-    $("gps-badge").classList.remove("on", "warn");
-    $("gps-badge").classList.add("off");
-    log(`GPS: ${msg}`, true);
-  },
+  (fix) => handleGpsFix(fix, "Phone"),
+  (msg) => handleGpsError(msg),
 );
+
+let remoteGps = null;
+
+function gpsRelayLink() {
+  return `${location.origin}/gps.html?s=${encodeURIComponent(state.remoteSessionId)}`;
+}
+
+function startRemoteGps(sessionId) {
+  state.gpsFix = null;
+  $("gps-remote-code").textContent = sessionId;
+  $("gps-remote-status").textContent = "Waiting for a phone to connect…";
+  remoteGps = new RemoteGpsClient(sessionId, {
+    onFix: (fix) => {
+      $("gps-remote-status").textContent = "Receiving live position from phone.";
+      handleGpsFix(fix, "Remote phone");
+    },
+    onStatus: ({ sourcesConnected }) => {
+      $("gps-remote-status").textContent =
+        sourcesConnected > 0
+          ? "Phone connected — waiting for its first GPS fix…"
+          : "Waiting for a phone to connect…";
+    },
+    onConnect: () => log(`Remote GPS relay connected (session ${sessionId}).`),
+    onDisconnect: () => handleGpsError("relay disconnected, reconnecting…"),
+    onError: (msg) => log(`Remote GPS: ${msg}`, true),
+  });
+  remoteGps.start();
+}
+
+function stopRemoteGps() {
+  remoteGps?.stop();
+  remoteGps = null;
+}
+
+function setGpsMode(mode) {
+  if (state.gpsMode === mode) return;
+  state.gpsMode = mode;
+  if (mode === "remote") {
+    geo.stop();
+    $("gps-remote-panel").classList.remove("hidden");
+    state.remoteSessionId = state.remoteSessionId || makeSessionCode();
+    startRemoteGps(state.remoteSessionId);
+    log("Switched to remote (phone) GPS source.");
+  } else {
+    stopRemoteGps();
+    $("gps-remote-panel").classList.add("hidden");
+    state.gpsFix = null;
+    geo.start();
+    log("Switched to this device's own GPS.");
+  }
+}
 
 /* ---------------- periodic re-estimate (time decay) ---------------- */
 
@@ -442,6 +500,27 @@ $("btn-fit").addEventListener("click", () => map.fitAll());
 $("btn-panel").addEventListener("click", () =>
   $("panel").classList.toggle("open"),
 );
+
+$("gps-source-select").addEventListener("change", (e) => setGpsMode(e.target.value));
+
+$("btn-gps-new-code").addEventListener("click", () => {
+  state.remoteSessionId = makeSessionCode();
+  stopRemoteGps();
+  startRemoteGps(state.remoteSessionId);
+  log(`New GPS relay session: ${state.remoteSessionId}`);
+});
+
+$("btn-gps-copy-link").addEventListener("click", async () => {
+  const link = gpsRelayLink();
+  try {
+    await navigator.clipboard.writeText(link);
+    $("btn-gps-copy-link").textContent = "Copied!";
+  } catch {
+    log(`Phone GPS link: ${link}`);
+    $("btn-gps-copy-link").textContent = "See log";
+  }
+  setTimeout(() => ($("btn-gps-copy-link").textContent = "Copy phone link"), 1500);
+});
 
 $("btn-copy-log").addEventListener("click", async () => {
   const text = debugLines.slice().reverse().join("\n");

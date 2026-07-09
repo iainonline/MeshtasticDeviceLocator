@@ -41,6 +41,32 @@
             </div>
           </section>
 
+          <section class="card" id="card-gps">
+            <h2>GPS Source</h2>
+            <div class="settings">
+              <label>
+                <select id="gps-source-select">
+                  <option value="local">This device's GPS</option>
+                  <option value="remote">Phone GPS (via code) — for when this device has no GPS, e.g. a Pi</option>
+                </select>
+              </label>
+            </div>
+            <div id="gps-remote-panel" class="hidden">
+              <div id="gps-remote-code" class="gps-code">——————</div>
+              <div id="gps-remote-status" class="muted">Generating session…</div>
+              <div class="row btnrow">
+                <button id="btn-gps-copy-link" class="ghost">Copy phone link</button>
+                <button id="btn-gps-new-code" class="ghost">New code</button>
+              </div>
+              <div class="hint">
+                Open the copied link on your phone (same network or internet —
+                it goes through this server either way), or on the phone go to
+                this site's <code>/gps.html</code> and enter the code shown
+                above.
+              </div>
+            </div>
+          </section>
+
           <section class="card" id="card-nodes">
             <h2>Nodes <span id="node-count" class="pill">0</span></h2>
             <input id="node-filter" type="search" placeholder="Filter nodes…" />
