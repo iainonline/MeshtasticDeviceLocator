@@ -80,7 +80,7 @@ export class Radio {
     try {
       if (transport === "bluetooth") {
         dbg(
-          `Requesting Bluetooth device (filtering by Meshtastic GATT service ${TransportWebBluetooth.ServiceUuid})…`,
+          `Requesting Bluetooth device (filtering by Meshtastic GATT service ${TransportWebBluetooth.ServiceUuid})… Tip: if the browser crashes when you tap Connect in the chooser, the crash is in the OS pairing step — pair the radio in Android's Bluetooth settings first (PIN is on the radio's screen), then retry here; an existing bond skips that step.`,
         );
         const device = await navigator.bluetooth.requestDevice({
           filters: [{ services: [TransportWebBluetooth.ServiceUuid] }],
