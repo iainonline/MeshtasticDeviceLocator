@@ -33,6 +33,10 @@ const map = new LocatorMap($("map"));
 
 // Full history (for "Copy debug log"), independent of the trimmed DOM list.
 const debugLines = [];
+// Lines recovered from the previous session at boot (e.g. one that crashed);
+// kept separately so "Copy debug log" can include them — they'd otherwise be
+// visible in the panel but impossible to copy out.
+const recoveredLines = [];
 
 // Mirrored to localStorage on every line so that if the page is killed
 // outright (Android backgrounding a Custom Tab during a native Bluetooth
@@ -528,7 +532,10 @@ $("btn-gps-copy-link").addEventListener("click", async () => {
 });
 
 $("btn-copy-log").addEventListener("click", async () => {
-  const text = debugLines.slice().reverse().join("\n");
+  let text = debugLines.slice().reverse().join("\n");
+  if (recoveredLines.length) {
+    text += `\n\n— Recovered log from previous session (last ${recoveredLines.length} lines, oldest first) —\n${recoveredLines.join("\n")}`;
+  }
   try {
     await navigator.clipboard.writeText(text);
     $("btn-copy-log").textContent = "Copied!";
@@ -555,6 +562,7 @@ $("btn-copy-log").addEventListener("click", async () => {
   try {
     const prev = JSON.parse(localStorage.getItem(LOG_STORAGE_KEY) || "null");
     if (Array.isArray(prev) && prev.length) {
+      recoveredLines.push(...prev);
       const box = document.createElement("div");
       box.style.cssText = "color:#d4a72c;border-top:1px dashed #d4a72c;margin-top:6px;padding-top:6px;";
       box.textContent = `— Recovered log from previous session (last ${prev.length} lines, oldest first) —`;
