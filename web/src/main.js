@@ -347,6 +347,11 @@ async function connect(transport) {
         "No Bluetooth device selected. Make sure the radio's Bluetooth is enabled (Meshtastic app → Radio Config → Bluetooth) and it's powered on and in range.",
         true,
       );
+    } else if (transport === "bluetooth") {
+      log(
+        "Bluetooth connect failed after pairing. Two common causes: (1) the official Meshtastic app is holding the radio — Meshtastic firmware allows only ONE Bluetooth connection, so force-stop the Meshtastic app (Android Settings → Apps → Meshtastic → Force stop) and retry; (2) a stale pairing — forget the Heltec in Android Bluetooth settings, power-cycle the radio, and pair again (watch the radio's screen for the PIN).",
+        true,
+      );
     }
     setConnecting(false);
     try {

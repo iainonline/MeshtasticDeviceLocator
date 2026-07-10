@@ -98,7 +98,39 @@ export class Radio {
           );
         }, 10000);
         try {
-          this.transport = await TransportWebBluetooth.createFromDevice(device);
+          // On Android, the first gatt.connect() to an unbonded device kicks
+          // off the OS pairing flow, and the GATT link routinely drops the
+          // moment bonding completes — the immediate retry then succeeds
+          // because the bond now exists. Native apps retry internally;
+          // a single-shot connect misreads this normal sequence as failure.
+          const MAX_ATTEMPTS = 4;
+          let lastErr = null;
+          for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+            try {
+              if (attempt > 1) dbg(`GATT connect attempt ${attempt}/${MAX_ATTEMPTS}…`);
+              this.transport = await TransportWebBluetooth.createFromDevice(device);
+              lastErr = null;
+              break;
+            } catch (err) {
+              lastErr = err;
+              dbg(
+                `GATT attempt ${attempt}/${MAX_ATTEMPTS} failed: ${err?.name || "Error"}: ${err?.message || err}${
+                  attempt < MAX_ATTEMPTS
+                    ? " — retrying (a drop right after Android finishes pairing is normal; the bond persists)."
+                    : ""
+                }`,
+              );
+              try {
+                device.gatt?.disconnect();
+              } catch {
+                /* already down */
+              }
+              if (attempt < MAX_ATTEMPTS) {
+                await new Promise((r) => setTimeout(r, 1500 * attempt));
+              }
+            }
+          }
+          if (lastErr) throw lastErr;
         } finally {
           clearTimeout(gattStall);
         }
