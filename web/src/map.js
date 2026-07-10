@@ -31,6 +31,21 @@ export class LocatorMap {
       this.follow = false;
       this.onFollowChange?.(false);
     });
+
+    // Leaflet measures its container once at init; if the viewport changes
+    // afterwards (rotation, URL bar collapsing, Custom Tab chrome settling
+    // after first paint) the map keeps painting at the stale size and the
+    // page looks clipped. Re-measure on every viewport change, and once
+    // shortly after load to catch a first paint that happened mid-layout.
+    let relayoutTimer = null;
+    const relayout = () => {
+      clearTimeout(relayoutTimer);
+      relayoutTimer = setTimeout(() => this.map.invalidateSize(), 150);
+    };
+    window.addEventListener("resize", relayout);
+    window.addEventListener("orientationchange", relayout);
+    window.visualViewport?.addEventListener("resize", relayout);
+    setTimeout(() => this.map.invalidateSize(), 500);
   }
 
   setFollow(v) {
