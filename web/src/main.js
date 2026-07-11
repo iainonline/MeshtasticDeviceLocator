@@ -24,6 +24,9 @@ const state = {
   pingTimer: null,
   estimateTimer: null,
   nodeFilter: "",
+  nodeDirectOnly: false,
+  nodeAgeFilter: 0, // seconds; 0 = any
+  nodeSort: "recent", // "recent" | "signal" | "hops"
   gpsMode: "local", // "local" | "remote"
   remoteSessionId: null,
 };
@@ -108,8 +111,31 @@ function ago(t) {
 
 /* ---------------- node list ---------------- */
 
+// Best-known hop distance for a node: prefer the hop count from an actual
+// received packet (lastHopsUsed); fall back to the routing-table hopsAway.
+// null = unknown.
+function nodeHops(n) {
+  if (typeof n.lastHopsUsed === "number") return n.lastHopsUsed;
+  if (typeof n.hopsAway === "number") return n.hopsAway;
+  return null;
+}
+
+function isDirect(n) {
+  return nodeHops(n) === 0 && !n.viaMqtt;
+}
+
+function hopBadge(n) {
+  const h = nodeHops(n);
+  if (n.viaMqtt) return `<span class="hop hop-mqtt">MQTT</span>`;
+  if (h === 0) return `<span class="hop hop-direct">direct · 0 hop</span>`;
+  if (h > 0) return `<span class="hop hop-relay">${h} hop${h > 1 ? "s" : ""}</span>`;
+  return `<span class="hop hop-unknown">? hops</span>`;
+}
+
 function renderNodes() {
   const nodes = state.radio ? [...state.radio.nodes.values()] : [];
+  const now = Date.now();
+  const maxAgeMs = state.nodeAgeFilter * 1000;
   const visible = nodes
     .filter((n) => n.num !== state.myNodeNum)
     .filter((n) =>
@@ -118,25 +144,41 @@ function renderNodes() {
           (n.shortName || "").toLowerCase().includes(state.nodeFilter)
         : true,
     )
-    .sort((a, b) => (b.lastHeard || 0) - (a.lastHeard || 0));
+    .filter((n) => (state.nodeDirectOnly ? isDirect(n) : true))
+    .filter((n) =>
+      maxAgeMs > 0 ? n.lastHeard && now - n.lastHeard <= maxAgeMs : true,
+    )
+    .sort((a, b) => {
+      if (state.nodeSort === "signal") {
+        return (b.lastRssi ?? -999) - (a.lastRssi ?? -999);
+      }
+      if (state.nodeSort === "hops") {
+        return (nodeHops(a) ?? 99) - (nodeHops(b) ?? 99);
+      }
+      return (b.lastHeard || 0) - (a.lastHeard || 0);
+    });
 
   $("node-count").textContent = String(visible.length);
   const ul = $("node-list");
   ul.innerHTML = "";
+  if (visible.length === 0 && nodes.length > 1) {
+    const li = document.createElement("li");
+    li.className = "node-empty";
+    li.textContent = state.nodeDirectOnly
+      ? "No 0-hop nodes yet — move closer to hear a node directly."
+      : "No nodes match the current filters.";
+    ul.appendChild(li);
+    return;
+  }
   for (const n of visible) {
     const li = document.createElement("li");
     if (n.num === state.targetNum) li.classList.add("selected");
-    const sig =
-      n.lastRssi != null
-        ? `${n.lastRssi} dBm`
-        : n.hopsAway > 0
-          ? `${n.hopsAway} hop${n.hopsAway > 1 ? "s" : ""}`
-          : "";
+    const sig = n.lastRssi != null ? `${n.lastRssi} dBm` : "";
     li.innerHTML = `
       <span class="nn-short">${escapeHtml(n.shortName || "??")}</span>
       <span class="nn-main">
         <div class="nn-name">${escapeHtml(nodeLabel(n))}</div>
-        <div class="nn-sub">${ago(n.lastHeard)}</div>
+        <div class="nn-sub">${hopBadge(n)} · ${ago(n.lastHeard)}</div>
       </span>
       <span class="nn-sig">${sig}</span>`;
     li.addEventListener("click", () => selectTarget(n.num));
@@ -495,6 +537,18 @@ $("chk-ping").addEventListener("change", restartPingTimer);
 
 $("node-filter").addEventListener("input", (e) => {
   state.nodeFilter = e.target.value.trim().toLowerCase();
+  renderNodes();
+});
+$("filter-direct").addEventListener("change", (e) => {
+  state.nodeDirectOnly = e.target.checked;
+  renderNodes();
+});
+$("filter-age").addEventListener("change", (e) => {
+  state.nodeAgeFilter = Number(e.target.value);
+  renderNodes();
+});
+$("filter-sort").addEventListener("change", (e) => {
+  state.nodeSort = e.target.value;
   renderNodes();
 });
 

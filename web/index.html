@@ -78,6 +78,30 @@
           <section class="card" id="card-nodes">
             <h2>Nodes <span id="node-count" class="pill">0</span></h2>
             <input id="node-filter" type="search" placeholder="Filter nodes…" />
+            <div class="node-filters">
+              <label class="toggle">
+                <input type="checkbox" id="filter-direct" />
+                Direct (0-hop) only
+              </label>
+              <label class="node-filter-sel">
+                Heard within
+                <select id="filter-age">
+                  <option value="0">Any time</option>
+                  <option value="60">1 min</option>
+                  <option value="300">5 min</option>
+                  <option value="900">15 min</option>
+                  <option value="3600">1 hour</option>
+                </select>
+              </label>
+              <label class="node-filter-sel">
+                Sort by
+                <select id="filter-sort">
+                  <option value="recent">Last heard</option>
+                  <option value="signal">Signal (strongest)</option>
+                  <option value="hops">Fewest hops</option>
+                </select>
+              </label>
+            </div>
             <ul id="node-list"></ul>
           </section>
 

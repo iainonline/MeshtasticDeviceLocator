@@ -210,8 +210,6 @@ export class Radio {
       if (typeof pkt.rxSnr === "number" && pkt.rxSnr !== 0) {
         rec.lastSnr = pkt.rxSnr;
       }
-      this.nodes.set(pkt.from, rec);
-      this.handlers.onNodes?.(this.nodes);
 
       // A usable ranging sample needs an RSSI reading and must have been
       // received directly (not relayed): over multiple hops the RSSI
@@ -219,6 +217,18 @@ export class Radio {
       const hopsUsed =
         pkt.hopStart && pkt.hopStart > 0 ? pkt.hopStart - pkt.hopLimit : null;
       const direct = hopsUsed === null ? !pkt.viaMqtt : hopsUsed === 0 && !pkt.viaMqtt;
+
+      // Record per-packet reception detail so the UI can show/filter which
+      // nodes we're actually hearing firsthand (the ones we can locate).
+      rec.lastHopsUsed = hopsUsed;
+      rec.viaMqtt = !!pkt.viaMqtt;
+      if (direct) {
+        rec.directHeard = true;
+        rec.lastDirectHeard = Date.now();
+      }
+      this.nodes.set(pkt.from, rec);
+      this.handlers.onNodes?.(this.nodes);
+
       if (typeof pkt.rxRssi === "number" && pkt.rxRssi !== 0) {
         this.handlers.onSignal?.({
           from: pkt.from,
