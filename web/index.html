@@ -105,6 +105,22 @@
             <ul id="node-list"></ul>
           </section>
 
+          <section class="card" id="card-network">
+            <h2>Network</h2>
+            <label class="toggle">
+              <input type="checkbox" id="net-show" />
+              Show nodes &amp; links on map
+            </label>
+            <div class="row btnrow">
+              <button id="btn-net-scan" class="ghost">Scan network</button>
+            </div>
+            <div id="net-status" class="muted" style="font-size:12px;">
+              Plots nodes that broadcast their own position, and (after a
+              scan) how they relay to each other. Scanning traceroutes each
+              node — slow on purpose, LoRa airtime is limited.
+            </div>
+          </section>
+
           <section class="card hidden" id="card-target">
             <h2>Target: <span id="target-name">—</span></h2>
             <div class="statgrid">

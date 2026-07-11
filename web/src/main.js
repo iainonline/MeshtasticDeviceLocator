@@ -29,6 +29,8 @@ const state = {
   nodeSort: "recent", // "recent" | "signal" | "hops"
   gpsMode: "local", // "local" | "remote"
   remoteSessionId: null,
+  netShow: false,
+  topology: new Map(), // "a-b" -> {a, b, snr}
 };
 
 const map = new LocatorMap($("map"));
@@ -184,6 +186,74 @@ function renderNodes() {
     li.addEventListener("click", () => selectTarget(n.num));
     ul.appendChild(li);
   }
+}
+
+/* ---------------- network overlay ---------------- */
+
+function renderNetwork() {
+  if (!state.radio) return;
+  const RECENT_MS = 10 * 60 * 1000;
+  const now = Date.now();
+  const positioned = [];
+  for (const n of state.radio.nodes.values()) {
+    if (n.num === state.myNodeNum) continue;
+    if (n.reportedLat == null || n.reportedLon == null) continue;
+    positioned.push({
+      num: n.num,
+      lat: n.reportedLat,
+      lon: n.reportedLon,
+      short: n.shortName || "•",
+      label: nodeLabel(n),
+      active: n.respondedAt && now - n.respondedAt < RECENT_MS,
+    });
+  }
+  const edges = [...state.topology.values()];
+  map.renderNetwork(positioned, edges);
+
+  const located = positioned.length;
+  const links = edges.filter(
+    (e) =>
+      positioned.some((p) => p.num === e.a) &&
+      positioned.some((p) => p.num === e.b),
+  ).length;
+  $("net-status").textContent =
+    `${located} node(s) with a broadcast position on the map, ${links} link(s) drawn.` +
+    (located === 0 ? " No nodes are broadcasting position yet." : "");
+}
+
+async function scanNetwork() {
+  if (!state.radio || !state.connected) {
+    log("Connect a radio before scanning the network.", true);
+    return;
+  }
+  if (state.radio.scanning) return;
+  const targets = [...state.radio.nodes.values()]
+    .filter((n) => n.num !== state.myNodeNum)
+    .sort((a, b) => (b.lastHeard || 0) - (a.lastHeard || 0))
+    .map((n) => n.num);
+  if (targets.length === 0) {
+    log("No known nodes to scan yet — wait for the node list to populate.", true);
+    return;
+  }
+  // Auto-enable the overlay so results are visible as they arrive.
+  if (!state.netShow) {
+    $("net-show").checked = true;
+    state.netShow = true;
+    renderNetwork();
+  }
+  $("btn-net-scan").disabled = true;
+  log(`Scanning network: tracerouting ${Math.min(targets.length, 20)} node(s), ~4s apart. LoRa airtime is limited, so this takes a while.`);
+  await state.radio.scanNetwork(targets, {
+    spacingMs: 4000,
+    max: 20,
+    onProgress: (i, total, num) => {
+      const rec = state.radio?.nodes.get(num);
+      $("net-status").textContent = `Scanning ${i}/${total}: ${rec ? nodeLabel(rec) : num}…`;
+    },
+  });
+  log("Network scan complete. Nodes that replied are marked active; links show how packets relayed.");
+  $("btn-net-scan").disabled = false;
+  renderNetwork();
 }
 
 function escapeHtml(s) {
@@ -365,11 +435,23 @@ async function connect(transport) {
         $("device-info").innerHTML = `Connected to Heltec V3 (${transport}) · my node <b>!${(num >>> 0).toString(16)}</b>`;
         renderNodes();
       },
-      onNodes: () => renderNodes(),
+      onNodes: () => {
+        renderNodes();
+        if (state.netShow) renderNetwork();
+      },
       onSignal: onSignal,
       onStatus: (status) => {
         // DeviceStatusEnum: 7 = configured, <=2 = disconnected
         if (status <= 2 && state.connected) handleDisconnect();
+      },
+      onTopology: ({ responder, edges }) => {
+        for (const e of edges) {
+          const key = e.a < e.b ? `${e.a}-${e.b}` : `${e.b}-${e.a}`;
+          state.topology.set(key, { a: e.a, b: e.b, snr: e.snr });
+        }
+        const rec = state.radio?.nodes.get(responder);
+        log(`Traceroute reply from ${rec ? nodeLabel(rec) : responder} — ${edges.length} link(s) mapped.`);
+        if (state.netShow) renderNetwork();
       },
       onDebug: (msg) => log(msg),
     });
@@ -551,6 +633,13 @@ $("filter-sort").addEventListener("change", (e) => {
   state.nodeSort = e.target.value;
   renderNodes();
 });
+
+$("net-show").addEventListener("change", (e) => {
+  state.netShow = e.target.checked;
+  if (state.netShow) renderNetwork();
+  else map.clearNetwork();
+});
+$("btn-net-scan").addEventListener("click", scanNetwork);
 
 $("set-freq").addEventListener("change", (e) => {
   state.params.freqMhz = Number(e.target.value);

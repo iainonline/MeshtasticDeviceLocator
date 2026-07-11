@@ -570,6 +570,27 @@ button.ghost {
   border: 2px solid #fff;
 }
 
+.net-node {
+  min-width: 24px;
+  height: 18px;
+  padding: 0 4px;
+  border-radius: 4px;
+  background: #7d56f3;
+  color: #fff;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 18px;
+  text-align: center;
+  border: 1px solid #fff;
+  white-space: nowrap;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
+}
+
+.net-node.active {
+  background: var(--green);
+  color: #05130a;
+}
+
 /* Leaflet dark-friendly attribution */
 .leaflet-container {
   font: inherit;

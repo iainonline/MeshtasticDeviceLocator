@@ -18,6 +18,8 @@ export class LocatorMap {
     }).addTo(this.map);
 
     this.samplesLayer = L.layerGroup().addTo(this.map);
+    // Network overlay: self-reported node positions + topology edges.
+    this.networkLayer = L.layerGroup().addTo(this.map);
     this.follow = true;
     this.hasCenteredOnce = false;
 
@@ -171,6 +173,57 @@ export class LocatorMap {
     });
   }
 
+  /**
+   * Draw the network overlay: a marker for every node that self-reports a
+   * position, plus topology edges between positioned nodes.
+   * @param {Array<{num,lat,lon,label,active}>} positionedNodes
+   * @param {Array<{a,b,snr}>} edges  node-num pairs
+   */
+  renderNetwork(positionedNodes, edges) {
+    this.networkLayer.clearLayers();
+    const byNum = new Map(positionedNodes.map((n) => [n.num, n]));
+
+    // Edges first, so node dots sit on top.
+    const drawn = new Set();
+    for (const e of edges) {
+      const a = byNum.get(e.a);
+      const b = byNum.get(e.b);
+      if (!a || !b) continue; // can only draw edges between located nodes
+      const key = e.a < e.b ? `${e.a}-${e.b}` : `${e.b}-${e.a}`;
+      if (drawn.has(key)) continue;
+      drawn.add(key);
+      const line = L.polyline(
+        [
+          [a.lat, a.lon],
+          [b.lat, b.lon],
+        ],
+        { color: "#7d56f3", weight: 2, opacity: 0.7 },
+      ).addTo(this.networkLayer);
+      if (e.snr != null) {
+        line.bindTooltip(`SNR ${e.snr.toFixed(1)} dB`, { sticky: true });
+      }
+    }
+
+    for (const n of positionedNodes) {
+      L.marker([n.lat, n.lon], {
+        icon: L.divIcon({
+          className: "net-node-wrap",
+          html: `<div class="net-node${n.active ? " active" : ""}">${escapeHtmlAttr(n.short || "•")}</div>`,
+          iconSize: [30, 18],
+          iconAnchor: [15, 9],
+        }),
+      })
+        .bindTooltip(n.label + (n.active ? " · responded" : ""), {
+          direction: "top",
+        })
+        .addTo(this.networkLayer);
+    }
+  }
+
+  clearNetwork() {
+    this.networkLayer.clearLayers();
+  }
+
   fitAll() {
     const items = [];
     if (this.lastUser) items.push([this.lastUser.lat, this.lastUser.lon]);
@@ -178,10 +231,21 @@ export class LocatorMap {
       const b = this.estimateCircle.getBounds();
       items.push(b.getSouthWest(), b.getNorthEast());
     }
+    this.networkLayer.eachLayer((l) => {
+      if (l.getLatLng) items.push(l.getLatLng());
+    });
     if (items.length) {
       this.map.fitBounds(L.latLngBounds(items).pad(0.2));
       this.follow = false;
       this.onFollowChange?.(false);
     }
   }
+}
+
+function escapeHtmlAttr(s) {
+  return String(s).replace(
+    /[&<>"']/g,
+    (c) =>
+      ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c],
+  );
 }

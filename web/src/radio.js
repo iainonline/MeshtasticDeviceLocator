@@ -245,6 +245,43 @@ export class Radio {
       this.handlers.onStatus?.(status);
     });
 
+    // Traceroute replies carry the full path (and per-hop SNR) between us and
+    // the responding node — this is the "who connects to who" data. The
+    // responder is, by definition, currently reachable/active.
+    ev.onTraceRoutePacket?.subscribe((pkt) => {
+      const responder = pkt.from;
+      const rd = pkt.data || {};
+      const route = (rd.route || []).map(Number);
+      const routeBack = (rd.routeBack || []).map(Number);
+      const me = this.myNodeNum;
+
+      // Forward path we sent along: me -> intermediate route -> responder.
+      const fwd = [me, ...route, responder].filter((n) => n != null);
+      // Return path the reply took: responder -> routeBack -> me.
+      const back = [responder, ...routeBack, me].filter((n) => n != null);
+
+      const edges = [];
+      const addPath = (path, snrs) => {
+        for (let i = 0; i < path.length - 1; i++) {
+          edges.push({
+            a: path[i],
+            b: path[i + 1],
+            snr: snrs && snrs[i] != null ? snrs[i] / 4 : null, // proto stores SNR*4
+          });
+        }
+      };
+      addPath(fwd, rd.snrTowards);
+      addPath(back, rd.snrBack);
+
+      const rec = this.nodes.get(responder);
+      if (rec) {
+        rec.respondedAt = Date.now();
+        this.nodes.set(responder, rec);
+      }
+      this.handlers.onTopology?.({ responder, edges });
+      this.handlers.onNodes?.(this.nodes);
+    });
+
     dbg("Calling device.configure() (requesting node/channel config from radio)…");
     const stall = setTimeout(() => {
       dbg(
@@ -273,6 +310,39 @@ export class Radio {
     } catch {
       // Rate-limited or busy; the next scheduled ping will retry.
     }
+  }
+
+  /**
+   * Probe the mesh: traceroute a set of nodes one at a time to discover which
+   * are reachable (they reply) and how they're connected. LoRa airtime is
+   * scarce and the firmware rate-limits traceroute, so this is deliberately
+   * slow and bounded. Returns when all probes have been sent (replies arrive
+   * asynchronously via onTopology).
+   */
+  async scanNetwork(nodeNums, { spacingMs = 4000, max = 20, onProgress } = {}) {
+    if (!this.device || this._scanning) return;
+    this._scanning = true;
+    const targets = nodeNums.slice(0, max);
+    try {
+      for (let i = 0; i < targets.length; i++) {
+        if (!this.device) break;
+        onProgress?.(i + 1, targets.length, targets[i]);
+        try {
+          await this.device.traceRoute(targets[i]);
+        } catch {
+          // rate-limited/busy — skip this one, keep going
+        }
+        if (i < targets.length - 1) {
+          await new Promise((r) => setTimeout(r, spacingMs));
+        }
+      }
+    } finally {
+      this._scanning = false;
+    }
+  }
+
+  get scanning() {
+    return !!this._scanning;
   }
 
   async disconnect() {
