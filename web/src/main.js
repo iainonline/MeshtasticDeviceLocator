@@ -219,6 +219,36 @@ function renderNetwork() {
   $("net-status").textContent =
     `${located} node(s) with a broadcast position on the map, ${links} link(s) drawn.` +
     (located === 0 ? " No nodes are broadcasting position yet." : "");
+
+  renderNetworkLinks(edges);
+}
+
+// Text list of every discovered link, including nodes that don't report a
+// position (so can't be drawn on the map). "·" = located, "○" = unlocated.
+function renderNetworkLinks(edges) {
+  const ul = $("net-links");
+  ul.innerHTML = "";
+  const endpointLabel = (num) => {
+    const rec = state.radio?.nodes.get(num);
+    const located = rec && rec.reportedLat != null;
+    return {
+      text: rec ? nodeLabel(rec) : `!${(num >>> 0).toString(16).padStart(8, "0")}`,
+      located,
+    };
+  };
+  const rows = edges
+    .map((e) => ({ ...e, a: endpointLabel(e.a), b: endpointLabel(e.b) }))
+    .sort((x, y) => (y.snr ?? -999) - (x.snr ?? -999));
+  for (const r of rows) {
+    const li = document.createElement("li");
+    li.className = "net-link";
+    const dot = (ep) =>
+      `<span class="ep-dot ${ep.located ? "ep-located" : "ep-unlocated"}" title="${ep.located ? "on map" : "no position"}"></span>`;
+    li.innerHTML =
+      `${dot(r.a)}${escapeHtml(r.a.text)} ↔ ${dot(r.b)}${escapeHtml(r.b.text)}` +
+      `<span class="net-link-snr">${r.snr != null ? `${r.snr.toFixed(1)} dB` : ""}</span>`;
+    ul.appendChild(li);
+  }
 }
 
 async function scanNetwork() {
@@ -451,6 +481,7 @@ async function connect(transport) {
         }
         const rec = state.radio?.nodes.get(responder);
         log(`Traceroute reply from ${rec ? nodeLabel(rec) : responder} — ${edges.length} link(s) mapped.`);
+        renderNetworkLinks([...state.topology.values()]);
         if (state.netShow) renderNetwork();
       },
       onDebug: (msg) => log(msg),
