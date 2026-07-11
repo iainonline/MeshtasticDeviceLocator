@@ -21,6 +21,8 @@ const MOBILE_SPREAD_M = 60; // positions differing by more than this => mobile
 const STATIC_SPREAD_M = 35; // positions all within this (over time) => static
 const STATIC_MIN_SPAN_MS = 3 * 60 * 1000; // need this much time to call it static
 const REPORTED_STALE_MS = 6 * 60 * 60 * 1000; // ignore self-reports older than this for "current" position
+const CONTEXT_STALE_MS = 30 * 60 * 1000; // ignore "where we heard it" context older than this
+const HOP_RANGE_M = 2500; // rough single-hop LoRa range for inferred-radius scaling
 
 export class NodeStore {
   constructor() {
@@ -39,6 +41,7 @@ export class NodeStore {
         samples: [], // {lat, lon, rssi, snr, t}
         reported: [], // {lat, lon, t}
         estimateHistory: [], // {lat, lon, t}
+        lastContext: null, // {obsLat, obsLon, hops, t} — where WE were when last heard
         estimate: null,
         mobility: "unknown",
         firstSeen: null,
@@ -64,6 +67,18 @@ export class NodeStore {
     if (t.samples.length > MAX_SAMPLES_PER_NODE) {
       t.samples.splice(0, t.samples.length - MAX_SAMPLES_PER_NODE);
     }
+  }
+
+  /**
+   * Record where WE were (and the hop distance) when we last heard a node —
+   * even via relay. Lets us give a coarse "somewhere out there" prediction
+   * for nodes that neither broadcast a position nor were heard directly.
+   */
+  setContext(num, ctx, nowMs) {
+    const t = this._track(num);
+    if (t.firstSeen == null) t.firstSeen = nowMs;
+    t.lastContext = ctx;
+    t.lastHeard = Math.max(t.lastHeard || 0, ctx.t || nowMs);
   }
 
   addReported(num, pos, nowMs) {
@@ -161,6 +176,22 @@ export class NodeStore {
         return { ...est, source: est.quality.mode === "coarse" ? "coarse" : "trilateration" };
       }
     }
+
+    // 3) Inferred: no position broadcast and never heard directly (only via
+    // relay). We can't pin it, but we know it was reachable from where we
+    // stood, within roughly (hops+1) single-hop ranges — a big honest circle
+    // centred on our last observation point.
+    if (t.lastContext && nowMs - t.lastContext.t < CONTEXT_STALE_MS) {
+      const hops = t.lastContext.hops == null ? 1 : t.lastContext.hops;
+      const radiusM = Math.min(HOP_RANGE_M * (hops + 1), 15000);
+      return {
+        lat: t.lastContext.obsLat,
+        lon: t.lastContext.obsLon,
+        radiusM,
+        source: "inferred",
+        quality: { hops },
+      };
+    }
     return null;
   }
 
@@ -205,6 +236,7 @@ export class NodeStore {
         samples: t.samples,
         reported: t.reported,
         estimateHistory: t.estimateHistory,
+        lastContext: t.lastContext,
         mobility: t.mobility,
         firstSeen: t.firstSeen,
         lastHeard: t.lastHeard,
@@ -225,6 +257,7 @@ export class NodeStore {
       t.estimateHistory = Array.isArray(s.estimateHistory)
         ? s.estimateHistory.slice(-MAX_ESTIMATE_HISTORY)
         : [];
+      t.lastContext = s.lastContext ?? null;
       t.mobility = s.mobility || "unknown";
       t.firstSeen = s.firstSeen ?? null;
       t.lastHeard = s.lastHeard ?? null;

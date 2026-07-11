@@ -237,6 +237,7 @@ export class LocatorMap {
       reported: "#3fb950", // node's own GPS
       trilateration: "#e5534b", // solved from RSSI
       coarse: "#d4a72c", // single/low-info guess
+      inferred: "#8b949e", // relay-only: rough "somewhere near here"
     };
     for (const n of list) {
       const color = SRC_COLOR[n.source] || "#8b949e";
@@ -245,7 +246,7 @@ export class LocatorMap {
         color,
         weight: n.selected ? 3 : 1.5,
         opacity: n.selected ? 1 : 0.6,
-        dashArray: n.source === "coarse" ? "6 6" : null,
+        dashArray: n.source === "coarse" || n.source === "inferred" ? "6 6" : null,
         fillColor: color,
         fillOpacity: n.selected ? 0.15 : 0.06,
       }).addTo(this.estimatesLayer);
@@ -272,6 +273,22 @@ export class LocatorMap {
 
   clearEstimates() {
     this.estimatesLayer?.clearLayers();
+  }
+
+  /** Centre the map on a node's estimate, zoomed to roughly show its circle. */
+  focusNode(lat, lon, radiusM) {
+    // Compute a bounding box for the circle directly (a circle not yet added
+    // to the map can't project itself via getBounds()).
+    const r = radiusM || 100;
+    const dLat = r / 111320;
+    const dLon = r / (111320 * Math.cos((lat * Math.PI) / 180) || 1e-6);
+    const bounds = L.latLngBounds(
+      [lat - dLat, lon - dLon],
+      [lat + dLat, lon + dLon],
+    );
+    this.map.fitBounds(bounds.pad(0.4), { maxZoom: 17 });
+    this.follow = false;
+    this.onFollowChange?.(false);
   }
 
   /** Fit the view to all drawn estimate markers (used when there's no GPS fix). */

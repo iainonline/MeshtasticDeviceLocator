@@ -650,6 +650,9 @@ button.ghost {
 .loc-coarse {
   color: var(--amber);
 }
+.loc-inferred {
+  color: var(--muted);
+}
 
 #net-links {
   list-style: none;

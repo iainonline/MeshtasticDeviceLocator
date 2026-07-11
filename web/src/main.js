@@ -205,7 +205,13 @@ function locBadge(track) {
   const src = track?.estimate?.source;
   if (!src) return "";
   const label =
-    src === "reported" ? "GPS" : src === "trilateration" ? "located" : "coarse";
+    src === "reported"
+      ? "GPS"
+      : src === "trilateration"
+        ? "located"
+        : src === "coarse"
+          ? "coarse"
+          : "approx";
   return ` · <span class="loc loc-${src}">${label}</span>`;
 }
 
@@ -328,12 +334,25 @@ function selectTarget(num) {
   for (const s of t?.samples ?? []) map.addSample(s);
   syncTargetFromStore();
   const rec = state.radio?.nodes.get(num);
-  $("target-name").textContent = rec ? nodeLabel(rec) : `#${num}`;
+  const name = rec ? nodeLabel(rec) : t?.longName || t?.shortName || `#${num}`;
+  $("target-name").textContent = name;
   $("card-target").classList.remove("hidden");
   renderNodes();
   recomputeAllAndRender();
   restartPingTimer();
-  log(`Tracking ${rec ? nodeLabel(rec) : num}. Walk or drive around it — samples from different bearings sharpen the fix.`);
+
+  // Make the selection visible: on mobile the panel covers the map, so close
+  // it, then pan to the node's estimate (or tell the user there's no fix yet).
+  $("panel").classList.remove("open");
+  const est = state.store.tracks.get(num)?.estimate;
+  if (est) {
+    map.focusNode(est.lat, est.lon, est.radiusM);
+    log(`Tracking ${name} — ${est.source} location, ±${fmtDist(est.radiusM)}. Circle it to sharpen.`);
+  } else {
+    log(`Tracking ${name} — no location yet. Move around; a fix appears once it's heard directly or broadcasts its position.`);
+  }
+  // Bring the detail card into view within the panel.
+  $("card-target").scrollIntoView?.({ block: "nearest" });
 }
 
 function stopTracking() {
@@ -349,6 +368,27 @@ function stopTracking() {
 
 function onSignal(sig) {
   const rec = state.radio?.nodes.get(sig.from);
+  // Record where we were when we heard it (even via relay) so nodes we can't
+  // range still get a coarse inferred prediction.
+  if (state.gpsFix) {
+    state.store.setContext(
+      sig.from,
+      {
+        obsLat: state.gpsFix.lat,
+        obsLon: state.gpsFix.lon,
+        hops: sig.hopsUsed,
+        t: sig.t,
+      },
+      Date.now(),
+    );
+    if (rec) {
+      state.store.setMeta(sig.from, {
+        shortName: rec.shortName,
+        longName: rec.longName,
+        lastHeard: rec.lastHeard,
+      });
+    }
+  }
   // Feed the store for EVERY node when we have a usable direct sample
   // (relayed packets and no-GPS moments can't be used for ranging).
   if (state.gpsFix && sig.direct) {
