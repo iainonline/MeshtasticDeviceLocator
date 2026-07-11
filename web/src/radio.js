@@ -195,8 +195,31 @@ export class Radio {
       if (ni.position && ni.position.latitudeI) {
         rec.reportedLat = ni.position.latitudeI / 1e7;
         rec.reportedLon = ni.position.longitudeI / 1e7;
+        this.handlers.onReported?.({
+          num: ni.num,
+          lat: rec.reportedLat,
+          lon: rec.reportedLon,
+          t: Date.now(),
+        });
       }
       this.nodes.set(ni.num, rec);
+      this.handlers.onNodes?.(this.nodes);
+    });
+
+    // Position packets: a node broadcasting its own GPS. Most accurate source
+    // of truth for where that node is, and the primary signal for mobility.
+    ev.onPositionPacket?.subscribe((pkt) => {
+      const pos = pkt.data || {};
+      if (!pos.latitudeI) return;
+      const num = pkt.from;
+      const lat = pos.latitudeI / 1e7;
+      const lon = pos.longitudeI / 1e7;
+      const rec = this.nodes.get(num) ?? { num };
+      rec.reportedLat = lat;
+      rec.reportedLon = lon;
+      rec.lastHeard = Date.now();
+      this.nodes.set(num, rec);
+      this.handlers.onReported?.({ num, lat, lon, t: Date.now() });
       this.handlers.onNodes?.(this.nodes);
     });
 

@@ -2,6 +2,7 @@ import "./style.css";
 import { Radio, webSerialSupported, webBluetoothSupported } from "./radio.js";
 import { GeoWatcher } from "./geo.js";
 import { RemoteGpsClient, makeSessionCode } from "./remote-gps.js";
+import { NodeStore } from "./nodes-store.js";
 import qrcode from "qrcode-generator";
 import { LocatorMap } from "./map.js";
 import {
@@ -31,7 +32,11 @@ const state = {
   remoteSessionId: null,
   netShow: false,
   topology: new Map(), // "a-b" -> {a, b, snr}
+  store: new NodeStore(),
+  showAllEstimates: true,
 };
+
+const NODES_STORAGE_KEY = "fabledMeshNodes";
 
 const map = new LocatorMap($("map"));
 
@@ -176,16 +181,32 @@ function renderNodes() {
     const li = document.createElement("li");
     if (n.num === state.targetNum) li.classList.add("selected");
     const sig = n.lastRssi != null ? `${n.lastRssi} dBm` : "";
+    const track = state.store.tracks.get(n.num);
     li.innerHTML = `
       <span class="nn-short">${escapeHtml(n.shortName || "??")}</span>
       <span class="nn-main">
-        <div class="nn-name">${escapeHtml(nodeLabel(n))}</div>
-        <div class="nn-sub">${hopBadge(n)} · ${ago(n.lastHeard)}</div>
+        <div class="nn-name">${escapeHtml(nodeLabel(n))}${mobBadge(track)}</div>
+        <div class="nn-sub">${hopBadge(n)} · ${ago(n.lastHeard)}${locBadge(track)}</div>
       </span>
       <span class="nn-sig">${sig}</span>`;
     li.addEventListener("click", () => selectTarget(n.num));
     ul.appendChild(li);
   }
+}
+
+function mobBadge(track) {
+  if (!track || track.mobility === "unknown") return "";
+  return track.mobility === "mobile"
+    ? ` <span class="mob mob-mobile">▶ mobile</span>`
+    : ` <span class="mob mob-static">■ static</span>`;
+}
+
+function locBadge(track) {
+  const src = track?.estimate?.source;
+  if (!src) return "";
+  const label =
+    src === "reported" ? "GPS" : src === "trilateration" ? "located" : "coarse";
+  return ` · <span class="loc loc-${src}">${label}</span>`;
 }
 
 /* ---------------- network overlay ---------------- */
@@ -301,17 +322,16 @@ function escapeHtml(s) {
 function selectTarget(num) {
   if (state.targetNum === num) return;
   state.targetNum = num;
-  state.samples = [];
-  state.estimate = null;
   map.clearSamples();
+  // Redraw whatever samples we've already accumulated for this node.
+  const t = state.store.tracks.get(num);
+  for (const s of t?.samples ?? []) map.addSample(s);
+  syncTargetFromStore();
   const rec = state.radio?.nodes.get(num);
   $("target-name").textContent = rec ? nodeLabel(rec) : `#${num}`;
   $("card-target").classList.remove("hidden");
   renderNodes();
-  updateTargetStats(null);
-  if (rec?.reportedLat != null) {
-    map.updateReported(rec.reportedLat, rec.reportedLon, nodeLabel(rec));
-  }
+  recomputeAllAndRender();
   restartPingTimer();
   log(`Tracking ${rec ? nodeLabel(rec) : num}. Walk or drive around it — samples from different bearings sharpen the fix.`);
 }
@@ -328,46 +348,51 @@ function stopTracking() {
 }
 
 function onSignal(sig) {
-  if (sig.from !== state.targetNum) return;
-  const rec = state.radio.nodes.get(sig.from);
-  if (!state.gpsFix) {
-    updateTargetStats(sig);
-    $("hint").textContent = "Signal heard, but no phone GPS fix yet — samples are being discarded.";
-    return;
+  const rec = state.radio?.nodes.get(sig.from);
+  // Feed the store for EVERY node when we have a usable direct sample
+  // (relayed packets and no-GPS moments can't be used for ranging).
+  if (state.gpsFix && sig.direct) {
+    const sample = {
+      lat: state.gpsFix.lat,
+      lon: state.gpsFix.lon,
+      rssi: sig.rssi,
+      snr: sig.snr,
+      t: sig.t,
+    };
+    state.store.addSample(sig.from, sample, Date.now());
+    if (rec) {
+      state.store.setMeta(sig.from, {
+        shortName: rec.shortName,
+        longName: rec.longName,
+        lastHeard: rec.lastHeard,
+      });
+    }
+    // Mirror the selected target's samples onto the map + detail panel.
+    if (sig.from === state.targetNum) {
+      state.samples.push(sample);
+      map.addSample(sample);
+    }
   }
-  if (!sig.direct) {
+
+  // Target-specific hints/stats for the node currently in focus.
+  if (sig.from === state.targetNum) {
+    if (!state.gpsFix) {
+      $("hint").textContent = "Signal heard, but no phone GPS fix yet — samples are being discarded.";
+    } else if (!sig.direct) {
+      $("hint").textContent = `Packet relayed over ${sig.hopsUsed} hop(s) — RSSI reflects the relay, sample skipped.`;
+    }
+    syncTargetFromStore();
     updateTargetStats(sig);
-    $("hint").textContent = `Packet relayed over ${sig.hopsUsed} hop(s) — RSSI reflects the relay, sample skipped.`;
-    return;
-  }
-  const sample = {
-    lat: state.gpsFix.lat,
-    lon: state.gpsFix.lon,
-    rssi: sig.rssi,
-    snr: sig.snr,
-    t: sig.t,
-  };
-  state.samples.push(sample);
-  map.addSample(sample);
-  recomputeEstimate();
-  updateTargetStats(sig);
-  if (rec?.reportedLat != null) {
-    map.updateReported(rec.reportedLat, rec.reportedLon, nodeLabel(rec));
   }
 }
 
-function recomputeEstimate() {
-  if (!state.targetNum || state.samples.length === 0) return;
-  const est = estimatePosition(state.samples, state.params);
-  if (!est) return;
-  state.estimate = est;
-  const rec = state.radio?.nodes.get(state.targetNum);
-  const name = rec ? nodeLabel(rec) : `#${state.targetNum}`;
-  map.updateEstimate(
-    est,
-    `${name} — probable location ±${fmtDist(est.radiusM)} (${est.quality.n} samples)`,
-  );
-  updateTargetStats(null);
+// Pull the selected target's accumulated samples + estimate out of the store
+// so the detail panel reflects everything collected for it.
+function syncTargetFromStore() {
+  if (state.targetNum == null) return;
+  const t = state.store.tracks.get(state.targetNum);
+  state.samples = t ? t.samples.slice() : [];
+  state.estimate = t?.estimate ?? null;
 }
 
 function updateTargetStats(sig) {
@@ -381,21 +406,27 @@ function updateTargetStats(sig) {
 
   const est = state.estimate;
   $("stat-radius").textContent = est ? `±${fmtDist(est.radiusM)}` : "—";
-  $("stat-spread").textContent = est?.quality.bearingSpreadDeg != null
+  $("stat-spread").textContent = est?.quality?.bearingSpreadDeg != null
     ? `${Math.round(est.quality.bearingSpreadDeg)}°`
     : "—";
 
+  const track = state.store.tracks.get(state.targetNum);
+  const mob = track?.mobility && track.mobility !== "unknown" ? ` · ${track.mobility}` : "";
+
   const hint = $("hint");
   if (!est) {
-    hint.textContent = state.samples.length === 0
-      ? "Waiting for a direct packet from the target…"
-      : "";
-  } else if (est.quality.mode === "coarse") {
-    hint.textContent = "Coarse estimate — need 3+ samples for trilateration.";
-  } else if (est.quality.mode === "low-diversity") {
+    hint.textContent =
+      state.samples.length === 0
+        ? "No location yet — waiting for a direct packet, or for this node to broadcast its position."
+        : "";
+  } else if (est.source === "reported") {
+    hint.textContent = `Location from the node's own GPS broadcast${mob}.`;
+  } else if (est.quality?.mode === "coarse") {
+    hint.textContent = "Coarse estimate — need 3+ direct samples for trilateration.";
+  } else if (est.quality?.mode === "low-diversity") {
     hint.textContent = "Low bearing diversity — move around the node (circle it) to tighten the fix.";
   } else {
-    hint.textContent = "";
+    hint.textContent = `Trilaterated from ${est.quality?.n ?? state.samples.length} samples${mob}.`;
   }
 }
 
@@ -411,25 +442,42 @@ function restartPingTimer() {
 
 /* ---------------- export ---------------- */
 
+// Export EVERY tracked node: metadata, mobility, estimate, and all raw
+// samples/reported positions — the full dataset for offline use.
 function exportJsonl() {
-  const rec = state.radio?.nodes.get(state.targetNum);
+  state.store.recomputeAll(state.params);
   const lines = [
     JSON.stringify({
       type: "session",
-      target: state.targetNum,
-      targetName: rec ? nodeLabel(rec) : null,
+      myNodeNum: state.myNodeNum,
       params: state.params,
       exportedAt: new Date().toISOString(),
-      estimate: state.estimate,
     }),
-    ...state.samples.map((s) => JSON.stringify({ type: "sample", ...s })),
   ];
+  for (const t of state.store.tracks.values()) {
+    lines.push(
+      JSON.stringify({
+        type: "node",
+        num: t.num,
+        shortName: t.shortName,
+        longName: t.longName,
+        mobility: t.mobility,
+        estimate: t.estimate,
+        firstSeen: t.firstSeen,
+        lastHeard: t.lastHeard,
+        sampleCount: t.samples.length,
+        reportedCount: t.reported.length,
+      }),
+    );
+    for (const s of t.samples) lines.push(JSON.stringify({ type: "sample", num: t.num, ...s }));
+    for (const r of t.reported) lines.push(JSON.stringify({ type: "reported", num: t.num, ...r }));
+  }
   const blob = new Blob([lines.join("\n") + "\n"], {
     type: "application/x-ndjson",
   });
   const a = document.createElement("a");
   a.href = URL.createObjectURL(blob);
-  a.download = `fabled-mesh-${state.targetNum}-${Date.now()}.jsonl`;
+  a.download = `fabled-mesh-all-${Date.now()}.jsonl`;
   a.click();
   URL.revokeObjectURL(a.href);
 }
@@ -462,6 +510,7 @@ async function connect(transport) {
     state.radio = new Radio({
       onMyNode: (num) => {
         state.myNodeNum = num;
+        state.store.myNodeNum = num;
         $("device-info").innerHTML = `Connected to Heltec V3 (${transport}) · my node <b>!${(num >>> 0).toString(16)}</b>`;
         renderNodes();
       },
@@ -470,6 +519,17 @@ async function connect(transport) {
         if (state.netShow) renderNetwork();
       },
       onSignal: onSignal,
+      onReported: ({ num, lat, lon, t }) => {
+        state.store.addReported(num, { lat, lon, t }, Date.now());
+        const rec = state.radio?.nodes.get(num);
+        if (rec) {
+          state.store.setMeta(num, {
+            shortName: rec.shortName,
+            longName: rec.longName,
+            lastHeard: rec.lastHeard,
+          });
+        }
+      },
       onStatus: (status) => {
         // DeviceStatusEnum: 7 = configured, <=2 = disconnected
         if (status <= 2 && state.connected) handleDisconnect();
@@ -625,12 +685,72 @@ function setGpsMode(mode) {
   }
 }
 
-/* ---------------- periodic re-estimate (time decay) ---------------- */
+/* ---------------- periodic re-estimate: ALL nodes ---------------- */
 
-state.estimateTimer = setInterval(() => {
-  if (state.samples.length >= 3) recomputeEstimate();
-  renderNodes(); // refresh "last heard" ages
-}, 5000);
+// Recompute every node's estimate + mobility, draw them on the map, keep the
+// selected target's detail panel in sync, and persist. Runs on a timer (time
+// decay + staleness change results even without new packets).
+function recomputeAllAndRender() {
+  const tracks = state.store.recomputeAll(state.params);
+  if (state.showAllEstimates) {
+    const list = [];
+    for (const t of tracks) {
+      if (!t.estimate) continue;
+      list.push({
+        num: t.num,
+        label: t.longName || t.shortName || `!${(t.num >>> 0).toString(16)}`,
+        short: t.shortName || "•",
+        lat: t.estimate.lat,
+        lon: t.estimate.lon,
+        radiusM: t.estimate.radiusM,
+        source: t.estimate.source,
+        mobility: t.mobility,
+        selected: t.num === state.targetNum,
+      });
+    }
+    map.renderEstimates(list);
+    // With no GPS fix to centre on, frame the located nodes once so the user
+    // sees them instead of a blank world map.
+    if (!state.gpsFix && !state._didEstimateFit && list.length) {
+      if (map.fitEstimates()) state._didEstimateFit = true;
+    }
+  } else {
+    map.clearEstimates();
+  }
+  if (state.targetNum != null) {
+    syncTargetFromStore();
+    updateTargetStats(null);
+  }
+  updateTrackingSummary(tracks);
+  renderNodes();
+}
+
+function updateTrackingSummary(tracks) {
+  const withEst = tracks.filter((t) => t.estimate).length;
+  const mobile = tracks.filter((t) => t.mobility === "mobile").length;
+  const staticN = tracks.filter((t) => t.mobility === "static").length;
+  const el = $("track-summary");
+  if (el) {
+    el.textContent = `${tracks.length} node(s) tracked · ${withEst} located · ${staticN} static · ${mobile} mobile`;
+  }
+}
+
+state.estimateTimer = setInterval(recomputeAllAndRender, 5000);
+
+// Persist accumulated data periodically and when the page goes away, so a
+// hunt's worth of samples/positions survives across sessions.
+function persistNodes() {
+  try {
+    const data = state.store.toJSON();
+    data.savedAt = new Date().toISOString();
+    localStorage.setItem(NODES_STORAGE_KEY, JSON.stringify(data));
+  } catch {
+    /* quota exceeded / unavailable — non-fatal */
+  }
+}
+state.persistTimer = setInterval(persistNodes, 30000);
+window.addEventListener("pagehide", persistNodes);
+window.addEventListener("beforeunload", persistNodes);
 
 /* ---------------- UI wiring ---------------- */
 
@@ -638,11 +758,13 @@ $("btn-connect-usb").addEventListener("click", () => connect("usb"));
 $("btn-connect-ble").addEventListener("click", () => connect("bluetooth"));
 $("btn-disconnect").addEventListener("click", () => disconnect());
 $("btn-clear").addEventListener("click", () => {
+  const t = state.targetNum != null ? state.store.tracks.get(state.targetNum) : null;
+  if (t) t.samples = [];
   state.samples = [];
   state.estimate = null;
   map.clearSamples();
-  updateTargetStats(null);
-  log("Samples reset.");
+  recomputeAllAndRender();
+  log("Samples reset for the selected node.");
 });
 $("btn-stop").addEventListener("click", stopTracking);
 $("btn-export").addEventListener("click", exportJsonl);
@@ -672,17 +794,42 @@ $("net-show").addEventListener("change", (e) => {
 });
 $("btn-net-scan").addEventListener("click", scanNetwork);
 
+$("track-show-all").addEventListener("change", (e) => {
+  state.showAllEstimates = e.target.checked;
+  recomputeAllAndRender();
+});
+$("btn-export-all").addEventListener("click", exportJsonl);
+$("btn-clear-data").addEventListener("click", () => {
+  if (!confirm("Clear all saved node data (samples, positions, estimates)? This cannot be undone.")) return;
+  state.store = new NodeStore();
+  state.store.myNodeNum = state.myNodeNum;
+  state.samples = [];
+  state.estimate = null;
+  try {
+    localStorage.removeItem(NODES_STORAGE_KEY);
+  } catch {
+    /* ignore */
+  }
+  map.clearEstimates();
+  map.clearSamples();
+  recomputeAllAndRender();
+  log("Cleared all saved node data.");
+});
+
+// Clicking a node's estimate circle on the map focuses it for detail/pinging.
+map.onEstimateClick = (num) => selectTarget(num);
+
 $("set-freq").addEventListener("change", (e) => {
   state.params.freqMhz = Number(e.target.value);
-  recomputeEstimate();
+  recomputeAllAndRender();
 });
 $("set-tx").addEventListener("change", (e) => {
   state.params.txPowerDbm = Number(e.target.value);
-  recomputeEstimate();
+  recomputeAllAndRender();
 });
 $("set-env").addEventListener("change", (e) => {
   state.params.pathLossExp = Number(e.target.value);
-  recomputeEstimate();
+  recomputeAllAndRender();
 });
 
 $("btn-follow").addEventListener("click", () => {
@@ -810,5 +957,19 @@ if (!webBluetoothSupported()) {
 if (!webSerialSupported() && !webBluetoothSupported()) {
   log("Neither connection method works in this browser. Open this page in Chrome or Edge on Android or desktop.", true);
 }
+// Restore any node data saved in a previous session.
+(() => {
+  try {
+    const saved = JSON.parse(localStorage.getItem(NODES_STORAGE_KEY) || "null");
+    if (saved && Array.isArray(saved.tracks) && saved.tracks.length) {
+      state.store.loadJSON(saved);
+      recomputeAllAndRender();
+      log(`Restored ${saved.tracks.length} node(s) from a previous session${saved.savedAt ? ` (saved ${saved.savedAt})` : ""}.`);
+    }
+  } catch {
+    /* corrupt/unavailable — start fresh */
+  }
+})();
+
 geo.start();
 log("Ready. Connect your Heltec V3 via USB-C or Bluetooth, then pick a node to hunt.");

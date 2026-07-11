@@ -224,6 +224,68 @@ export class LocatorMap {
     this.networkLayer.clearLayers();
   }
 
+  /**
+   * Draw an estimate circle + marker for EVERY node we can place.
+   * @param {Array<{num,label,short,lat,lon,radiusM,source,mobility,selected}>} list
+   */
+  renderEstimates(list) {
+    if (!this.estimatesLayer) {
+      this.estimatesLayer = L.layerGroup().addTo(this.map);
+    }
+    this.estimatesLayer.clearLayers();
+    const SRC_COLOR = {
+      reported: "#3fb950", // node's own GPS
+      trilateration: "#e5534b", // solved from RSSI
+      coarse: "#d4a72c", // single/low-info guess
+    };
+    for (const n of list) {
+      const color = SRC_COLOR[n.source] || "#8b949e";
+      L.circle([n.lat, n.lon], {
+        radius: n.radiusM,
+        color,
+        weight: n.selected ? 3 : 1.5,
+        opacity: n.selected ? 1 : 0.6,
+        dashArray: n.source === "coarse" ? "6 6" : null,
+        fillColor: color,
+        fillOpacity: n.selected ? 0.15 : 0.06,
+      }).addTo(this.estimatesLayer);
+
+      const mob =
+        n.mobility === "mobile" ? "▶" : n.mobility === "static" ? "■" : "";
+      L.marker([n.lat, n.lon], {
+        zIndexOffset: n.selected ? 500 : 0,
+        icon: L.divIcon({
+          className: "est-node-wrap",
+          html: `<div class="est-node est-${n.source}${n.selected ? " selected" : ""}">${escapeHtmlAttr(n.short || "•")}${mob ? `<span class="est-mob">${mob}</span>` : ""}</div>`,
+          iconSize: [34, 18],
+          iconAnchor: [17, 9],
+        }),
+      })
+        .bindTooltip(
+          `${n.label} · ${n.source}${n.mobility !== "unknown" ? ` · ${n.mobility}` : ""} · ±${n.radiusM >= 1000 ? (n.radiusM / 1000).toFixed(1) + "km" : Math.round(n.radiusM) + "m"}`,
+          { direction: "top" },
+        )
+        .on("click", () => this.onEstimateClick?.(n.num))
+        .addTo(this.estimatesLayer);
+    }
+  }
+
+  clearEstimates() {
+    this.estimatesLayer?.clearLayers();
+  }
+
+  /** Fit the view to all drawn estimate markers (used when there's no GPS fix). */
+  fitEstimates() {
+    if (!this.estimatesLayer) return false;
+    const pts = [];
+    this.estimatesLayer.eachLayer((l) => {
+      if (l.getLatLng) pts.push(l.getLatLng());
+    });
+    if (!pts.length) return false;
+    this.map.fitBounds(L.latLngBounds(pts).pad(0.3), { maxZoom: 16 });
+    return true;
+  }
+
   fitAll() {
     const items = [];
     if (this.lastUser) items.push([this.lastUser.lat, this.lastUser.lon]);

@@ -591,6 +591,66 @@ button.ghost {
   color: #05130a;
 }
 
+.est-node {
+  min-width: 24px;
+  height: 18px;
+  padding: 0 4px;
+  border-radius: 4px;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 18px;
+  text-align: center;
+  border: 1px solid #fff;
+  white-space: nowrap;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
+  color: #fff;
+}
+
+.est-reported {
+  background: var(--green);
+  color: #05130a;
+}
+.est-trilateration {
+  background: var(--red);
+}
+.est-coarse {
+  background: var(--amber);
+  color: #1a1200;
+}
+.est-node.selected {
+  outline: 2px solid #fff;
+  outline-offset: 1px;
+}
+.est-mob {
+  margin-left: 2px;
+  font-size: 9px;
+}
+
+.mob {
+  font-size: 10px;
+  font-weight: 600;
+  padding: 0 4px;
+  border-radius: 4px;
+}
+.mob-mobile {
+  color: #2f81f7;
+  border: 1px solid #2f81f7;
+}
+.mob-static {
+  color: var(--muted);
+  border: 1px solid var(--border);
+}
+
+.loc-reported {
+  color: var(--green);
+}
+.loc-trilateration {
+  color: var(--red);
+}
+.loc-coarse {
+  color: var(--amber);
+}
+
 #net-links {
   list-style: none;
   margin: 8px 0 0;

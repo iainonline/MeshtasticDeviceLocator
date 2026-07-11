@@ -75,6 +75,27 @@
             </div>
           </section>
 
+          <section class="card" id="card-tracking">
+            <h2>Tracking</h2>
+            <label class="toggle">
+              <input type="checkbox" id="track-show-all" checked />
+              Show all node estimates on map
+            </label>
+            <div id="track-summary" class="muted" style="font-size:12px;margin-top:6px;">
+              No nodes tracked yet.
+            </div>
+            <div class="row btnrow">
+              <button id="btn-export-all" class="ghost">Export all data</button>
+              <button id="btn-clear-data" class="ghost">Clear saved data</button>
+            </div>
+            <div class="hint" style="color:var(--muted);">
+              Estimates all nodes from signal + self-reported position, saved
+              locally between sessions. Circle colour = source: green
+              (node's GPS), red (trilaterated), amber (coarse). ■ static,
+              ▶ mobile.
+            </div>
+          </section>
+
           <section class="card" id="card-nodes">
             <h2>Nodes <span id="node-count" class="pill">0</span></h2>
             <input id="node-filter" type="search" placeholder="Filter nodes…" />
