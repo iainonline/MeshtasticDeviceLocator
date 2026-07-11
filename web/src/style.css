@@ -314,6 +314,24 @@ button.ghost {
   margin-top: 8px;
 }
 
+.gps-qr {
+  /* White quiet zone is required for reliable scanning in either theme. */
+  background: #fff;
+  border-radius: 8px;
+  padding: 10px;
+  margin: 4px auto 8px;
+  width: max-content;
+  max-width: 100%;
+  line-height: 0;
+}
+
+.gps-qr svg {
+  display: block;
+  width: 200px;
+  max-width: 100%;
+  height: auto;
+}
+
 .row {
   margin-top: 6px;
 }

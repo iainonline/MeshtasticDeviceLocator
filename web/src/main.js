@@ -2,6 +2,7 @@ import "./style.css";
 import { Radio, webSerialSupported, webBluetoothSupported } from "./radio.js";
 import { GeoWatcher } from "./geo.js";
 import { RemoteGpsClient, makeSessionCode } from "./remote-gps.js";
+import qrcode from "qrcode-generator";
 import { LocatorMap } from "./map.js";
 import {
   DEFAULT_PARAMS,
@@ -413,9 +414,20 @@ function gpsRelayLink() {
   return `${location.origin}/gps.html?s=${encodeURIComponent(state.remoteSessionId)}`;
 }
 
+function renderGpsQr() {
+  const link = gpsRelayLink();
+  // 'L' error correction keeps the code sparse (easier to scan on a small
+  // panel); the payload is a short URL so capacity isn't a concern.
+  const qr = qrcode(0, "L");
+  qr.addData(link);
+  qr.make();
+  $("gps-qr").innerHTML = qr.createSvgTag({ cellSize: 5, margin: 2 });
+}
+
 function startRemoteGps(sessionId) {
   state.gpsFix = null;
   $("gps-remote-code").textContent = sessionId;
+  renderGpsQr();
   $("gps-remote-status").textContent = "Waiting for a phone to connect…";
   remoteGps = new RemoteGpsClient(sessionId, {
     onFix: (fix) => {

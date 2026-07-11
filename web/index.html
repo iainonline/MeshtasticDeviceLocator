@@ -56,6 +56,10 @@
               </label>
             </div>
             <div id="gps-remote-panel" class="hidden">
+              <div id="gps-qr" class="gps-qr" title="Scan with your phone"></div>
+              <div class="hint" style="text-align:center;color:var(--muted);">
+                Scan with your phone's camera to open the GPS forwarder.
+              </div>
               <div id="gps-remote-code" class="gps-code">——————</div>
               <div id="gps-remote-status" class="muted">Generating session…</div>
               <div class="row btnrow">
@@ -63,10 +67,10 @@
                 <button id="btn-gps-new-code" class="ghost">New code</button>
               </div>
               <div class="hint">
-                Open the copied link on your phone (same network or internet —
-                it goes through this server either way), or on the phone go to
-                this site's <code>/gps.html</code> and enter the code shown
-                above.
+                Can't scan? Open the copied link on your phone, or go to this
+                site's <code>/gps.html</code> and enter the code shown above.
+                Works over the same network or the internet — it all goes
+                through this server.
               </div>
             </div>
           </section>
